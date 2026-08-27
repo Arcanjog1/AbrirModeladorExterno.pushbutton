@@ -413,12 +413,43 @@ def _obb_2d(center, half_x, half_y, x_dir, y_dir):
 
 
 def _obb_corners(obb):
+    # DESEMPENHO (2026-08-27): os 4 cantos so' dependem dos campos que
+    # `_obb_2d` ja' congelou na criacao - o mesmo OBB e' comparado contra
+    # dezenas/centenas de outros dentro de `validate_same_course_collision`
+    # / `collisions_between`, e recalcular 4 XYZ (2 somas + 2 escalares
+    # cada) a cada par era ~60% do custo do SAT. O cache fica no proprio
+    # dict do OBB (nunca iterado por ninguem - ver os unicos consumidores,
+    # `_obb_min_overlap` e esta funcao) e morre junto com ele.
+    cached = obb.get("_corners")
+    if cached is not None:
+        return cached
     c = obb["center"]
     x_dir = obb["x_dir"]
     y_dir = obb["y_dir"]
     hx = obb["half_x"]
     hy = obb["half_y"]
-    return [c + x_dir * (sx * hx) + y_dir * (sy * hy) for sx in (-1.0, 1.0) for sy in (-1.0, 1.0)]
+    corners = [c + x_dir * (sx * hx) + y_dir * (sy * hy)
+               for sx in (-1.0, 1.0) for sy in (-1.0, 1.0)]
+    obb["_corners"] = corners
+    return corners
+
+
+def _obb_aabb(obb):
+    """Caixa alinhada aos eixos (x_min, y_min, x_max, y_max, em ft) que
+    envolve `obb` - pre-filtro BARATO e CONSERVADOR: se duas AABB nao se
+    tocam, os OBB dentro delas tambem nao se tocam (nunca o contrario), o
+    que permite descartar um par sem rodar o SAT completo. Tambem e' a
+    chave do indice espacial de `_collision_candidate_pairs`."""
+    cached = obb.get("_aabb")
+    if cached is not None:
+        return cached
+    xs, ys = [], []
+    for corner in _obb_corners(obb):
+        xs.append(corner.X)
+        ys.append(corner.Y)
+    box = (min(xs), min(ys), max(xs), max(ys))
+    obb["_aabb"] = box
+    return box
 
 
 def _obb_min_overlap(obb_a, obb_b):
@@ -1406,16 +1437,76 @@ def collisions_between(candidates, others, eps_ft=BOND_COLLISION_EPS_FT):
     de O((n+m)^2) - e' o que torna viavel checar colisao a cada parede (e
     a cada tentativa de ajuste) em vez de so' uma vez no fim."""
     found = []
+    if not candidates or not others:
+        return found
+
+    # DESEMPENHO (2026-08-27): antes, CADA par (i, j) reconstruia os dois
+    # OBB do zero - 8 XYZ novos por par, com a peca `i` remontada `m` vezes
+    # e a peca `j` remontada `n` vezes. Agora cada OBB e' construido UMA vez
+    # por chamada, e um indice espacial (por FIADA, mesma ideia de
+    # `_collision_candidate_pairs`) evita comparar pecas que estao longe
+    # demais para se tocarem. Esta funcao roda uma vez por parede POR
+    # TENTATIVA de ajuste, entao era o segundo maior custo do Solver 18
+    # depois de `validate_same_course_collision`. Os pares devolvidos - e a
+    # ORDEM deles (i crescente, j crescente dentro de cada i) - continuam
+    # exatamente os do laco duplo.
+    other_obbs = [_candidate_obb(o) for o in others]
+    other_boxes = [_obb_aabb(obb) for obb in other_obbs]
+    margin_ft = abs(eps_ft)
+
+    cell = COLLISION_GRID_MIN_CELL_FT
+    for x0, y0, x1, y1 in other_boxes:
+        span = x1 - x0
+        if span > cell:
+            cell = span
+        span = y1 - y0
+        if span > cell:
+            cell = span
+    cell += margin_ft
+
+    floor = math.floor
+    grid = {}
+    for j, other in enumerate(others):
+        x0, y0, x1, y1 = other_boxes[j]
+        course = other["course"]
+        for gx in range(int(floor((x0 - margin_ft) / cell)),
+                        int(floor((x1 + margin_ft) / cell)) + 1):
+            for gy in range(int(floor((y0 - margin_ft) / cell)),
+                            int(floor((y1 + margin_ft) / cell)) + 1):
+                key = (course, gx, gy)
+                bucket = grid.get(key)
+                if bucket is None:
+                    grid[key] = [j]
+                else:
+                    bucket.append(j)
+
     for i, cand in enumerate(candidates):
-        for j, other in enumerate(others):
-            if cand["course"] != other["course"]:
-                continue
+        obb_i = _candidate_obb(cand)
+        ax0, ay0, ax1, ay1 = _obb_aabb(obb_i)
+        ax0 -= margin_ft
+        ay0 -= margin_ft
+        ax1 += margin_ft
+        ay1 += margin_ft
+        course = cand["course"]
+        node_index = cand.get("node_index")
+        nearby = set()
+        for gx in range(int(floor(ax0 / cell)), int(floor(ax1 / cell)) + 1):
+            for gy in range(int(floor(ay0 / cell)), int(floor(ay1 / cell)) + 1):
+                bucket = grid.get((course, gx, gy))
+                if bucket:
+                    nearby.update(bucket)
+        if not nearby:
+            continue
+        for j in sorted(nearby):
+            other = others[j]
             if cand is other:
                 continue
-            node_index = cand.get("node_index")
             if node_index is not None and node_index == other.get("node_index"):
                 continue
-            if _obb_overlap(_candidate_obb(cand), _candidate_obb(other), eps_ft):
+            bx0, by0, bx1, by1 = other_boxes[j]
+            if ax1 < bx0 or bx1 < ax0 or ay1 < by0 or by1 < ay0:
+                continue
+            if _obb_overlap(obb_i, other_obbs[j], eps_ft):
                 found.append((i, j))
     return found
 
@@ -1480,13 +1571,30 @@ def find_door_void_violations(candidates, walls_to_create, openings_per_wall, ba
 
     Cada violacao: {"wall_idx", "opening_index", "candidate", "overlap_cm"}."""
     violations = []
+    # DESEMPENHO (2026-08-27): UMA passada montando o indice parede ->
+    # pecas, em vez de reler a lista INTEIRA de candidatos uma vez por
+    # parede (que era O(paredes x pecas) - com 306 eixos e ~18k pecas, ~5.5
+    # milhoes de leituras so' para descobrir de quem e' cada peca). Mesmo
+    # criterio de antes: a peca conta para a parede "dona" (`wall_idx`) E
+    # para a secundaria de um encontro (`secondary_wall_idx`).
+    candidates_by_wall = {}
+    for cand in candidates:
+        for key in ("wall_idx", "secondary_wall_idx"):
+            idx = cand.get(key)
+            if idx is None:
+                continue
+            bucket = candidates_by_wall.get(idx)
+            if bucket is None:
+                candidates_by_wall[idx] = [cand]
+            elif bucket[-1] is not cand:
+                # `wall_idx == secondary_wall_idx` (peca cujas duas paredes
+                # sao a mesma) nao pode entrar duas vezes no mesmo balde.
+                bucket.append(cand)
+
     for wall_idx, openings in enumerate(openings_per_wall):
         if wall_idx >= len(walls_to_create):
             continue
-        same_wall_candidates = [
-            c for c in candidates
-            if c.get("wall_idx") == wall_idx or c.get("secondary_wall_idx") == wall_idx
-        ]
+        same_wall_candidates = candidates_by_wall.get(wall_idx)
         if not same_wall_candidates:
             continue
         for opening_index, (t_lo, t_hi, sill_z_abs, _head_z_abs) in enumerate(openings):
@@ -1521,6 +1629,178 @@ def candidates_near_wall(candidates, wall_p0, wall_dir, wall_length_ft, reach_ft
     return near
 
 
+# Lado MINIMO da celula do indice espacial de `_collision_candidate_pairs`
+# (ft). O lado real e' o maior lado de AABB do proprio lote (mais a
+# margem), para que nenhuma peca ocupe mais de 2x2 celulas; este piso so'
+# evita uma grade absurdamente fina num lote degenerado de pecas
+# minusculas. Qualquer valor daria o MESMO resultado (a corretude nao
+# depende do lado - ver docstring); o valor so' regula memoria x varredura.
+COLLISION_GRID_MIN_CELL_FT = 20.0 / 100.0 * FEET_PER_METER
+
+
+def _collision_candidate_pairs(indexes, boxes, margin_ft):
+    """Pares (i, j), i < j, de `indexes` cujas AABB (lidas de `boxes`, uma
+    por indice) estao a menos de `margin_ft` uma da outra - ou seja, TODO
+    par que ainda tem chance de colidir, nunca menos.
+
+    Substitui a varredura "todos contra todos" O(n^2) por um indice
+    espacial em grade uniforme: cada peca entra em TODAS as celulas que sua
+    AABB (dilatada pela margem) cobre, e so' pecas que dividem alguma
+    celula sao comparadas. Isso NAO e' uma heuristica - duas AABB que se
+    tocam tem intersecao nao vazia, e todo ponto dessa intersecao cai em
+    alguma celula coberta pelas DUAS, entao o par sempre aparece em pelo
+    menos um balde. O conjunto devolvido e' exatamente o mesmo que o laco
+    duplo produzia, so' que sem visitar os pares distantes (que numa planta
+    real sao a esmagadora maioria: pecas em paredes a dezenas de metros de
+    distancia nunca poderiam se tocar).
+
+    CAUSA-RAIZ do travamento relatado em producao (2026-08-27, planta de
+    306 eixos): com ~12k pecas por banda, o laco duplo fazia ~70 milhoes de
+    pares POR BANDA - medido em profiler, 95% do tempo total do Solver 18
+    ficava aqui, todo ele DEPOIS da ultima parede processada (por isso a
+    barra travava em 99%/"nao esta respondendo")."""
+    if len(indexes) < 2:
+        return []
+    cell = COLLISION_GRID_MIN_CELL_FT
+    for k in indexes:
+        x0, y0, x1, y1 = boxes[k]
+        span = x1 - x0
+        if span > cell:
+            cell = span
+        span = y1 - y0
+        if span > cell:
+            cell = span
+    cell += margin_ft
+
+    grid = {}
+    floor = math.floor
+    for k in indexes:
+        x0, y0, x1, y1 = boxes[k]
+        gx0 = int(floor((x0 - margin_ft) / cell))
+        gx1 = int(floor((x1 + margin_ft) / cell))
+        gy0 = int(floor((y0 - margin_ft) / cell))
+        gy1 = int(floor((y1 + margin_ft) / cell))
+        for gx in range(gx0, gx1 + 1):
+            for gy in range(gy0, gy1 + 1):
+                key = (gx, gy)
+                bucket = grid.get(key)
+                if bucket is None:
+                    grid[key] = [k]
+                else:
+                    bucket.append(k)
+
+    pairs = set()
+    for bucket in grid.values():
+        count = len(bucket)
+        if count < 2:
+            continue
+        for a in range(count):
+            ia = bucket[a]
+            ax0, ay0, ax1, ay1 = boxes[ia]
+            ax0 -= margin_ft
+            ay0 -= margin_ft
+            ax1 += margin_ft
+            ay1 += margin_ft
+            for b in range(a + 1, count):
+                ib = bucket[b]
+                bx0, by0, bx1, by1 = boxes[ib]
+                if ax1 < bx0 or bx1 < ax0 or ay1 < by0 or by1 < ay0:
+                    continue
+                pairs.add((ia, ib) if ia < ib else (ib, ia))
+    return pairs
+
+
+# Lado da celula (ft) do indice espacial de pecas JA LANCADAS
+# (`_placed_index_*`). 1m e' um pouco maior que WALL_COLLISION_REACH_CM
+# (80cm), entao a consulta de uma parede toca poucas celulas por metro de
+# eixo. Como em `_collision_candidate_pairs`, o valor NAO muda o resultado -
+# so' o equilibrio entre numero de baldes e tamanho de cada um.
+PLACED_INDEX_CELL_FT = 100.0 / 100.0 * FEET_PER_METER
+
+
+def _placed_index_new():
+    """Indice espacial INCREMENTAL das pecas ja' lancadas, para
+    `_placed_index_near_wall`.
+
+    `items` guarda as pecas na MESMA ordem em que entraram (a ordem de
+    `all_candidates` em `process_walls_one_by_one`) e `cells` mapeia
+    celula da grade -> posicoes em `items`, pela ORIGEM da peca (que e'
+    exatamente o ponto que `candidates_near_wall` testa)."""
+    return {"cells": {}, "items": []}
+
+
+def _placed_index_add(index, candidates):
+    """Acrescenta `candidates` ao indice, preservando a ordem de chegada."""
+    cells = index["cells"]
+    items = index["items"]
+    floor = math.floor
+    for cand in candidates:
+        position = len(items)
+        items.append(cand)
+        origin = cand["origin_world"]
+        key = (int(floor(origin.X / PLACED_INDEX_CELL_FT)),
+               int(floor(origin.Y / PLACED_INDEX_CELL_FT)))
+        bucket = cells.get(key)
+        if bucket is None:
+            cells[key] = [position]
+        else:
+            bucket.append(position)
+    return index
+
+
+def _placed_index_near_wall(index, wall_p0, wall_dir, wall_length_ft, reach_ft,
+                            exclude_wall_idx=None):
+    """As pecas do indice que podem encostar nesta parede, EXCLUINDO as da
+    propria `exclude_wall_idx` - o mesmo conjunto, na mesma ordem, que
+    `candidates_near_wall(...)` devolveria varrendo a lista inteira.
+
+    DESEMPENHO (2026-08-27): `process_walls_one_by_one` refazia, A CADA
+    PAREDE, uma copia filtrada de TODOS os candidatos ja' lancados e depois
+    passava a lista inteira por `candidates_near_wall` - O(paredes x pecas),
+    com conta vetorial (subtracao + DotProduct + GetLength) em cada peca.
+    Como `all_candidates` cresce a cada parede processada, o custo por
+    parede subia ao longo do laco: as ULTIMAS paredes da planta eram, de
+    longe, as mais lentas (a queixa real de "demora muito na etapa final").
+    Aqui so' as celulas cobertas pelo proprio eixo (dilatado por `reach_ft`)
+    sao lidas - o resto da planta nem e' tocado.
+
+    CORRETUDE: toda peca aprovada por `candidates_near_wall` tem projecao no
+    eixo dentro de [-reach, comprimento+reach] e distancia perpendicular
+    <= reach, logo sua ORIGEM esta' dentro da caixa do eixo dilatada por
+    `reach_ft` - que e' exatamente a regiao consultada. O conjunto lido e'
+    um SUPERconjunto, e o teste exato de `candidates_near_wall` roda por
+    cima dele; as posicoes sao ordenadas antes para a lista sair na mesma
+    ordem de insercao de antes."""
+    cells = index["cells"]
+    items = index["items"]
+    if not items:
+        return []
+    p1 = wall_p0 + wall_dir * wall_length_ft
+    x_lo = min(wall_p0.X, p1.X) - reach_ft
+    x_hi = max(wall_p0.X, p1.X) + reach_ft
+    y_lo = min(wall_p0.Y, p1.Y) - reach_ft
+    y_hi = max(wall_p0.Y, p1.Y) + reach_ft
+    floor = math.floor
+    positions = []
+    for gx in range(int(floor(x_lo / PLACED_INDEX_CELL_FT)),
+                    int(floor(x_hi / PLACED_INDEX_CELL_FT)) + 1):
+        for gy in range(int(floor(y_lo / PLACED_INDEX_CELL_FT)),
+                        int(floor(y_hi / PLACED_INDEX_CELL_FT)) + 1):
+            bucket = cells.get((gx, gy))
+            if bucket:
+                positions.extend(bucket)
+    if not positions:
+        return []
+    positions.sort()
+    nearby = []
+    for position in positions:
+        cand = items[position]
+        if exclude_wall_idx is not None and cand.get("wall_idx") == exclude_wall_idx:
+            continue
+        nearby.append(cand)
+    return candidates_near_wall(nearby, wall_p0, wall_dir, wall_length_ft, reach_ft)
+
+
 def validate_same_course_collision(candidates, eps_ft=BOND_COLLISION_EPS_FT):
     """Secao 19 do prompt: nenhum par de candidatos da MESMA fiada pode
     colidir (interpenetracao solida) - sobreposicao entre fiadas
@@ -1528,21 +1808,46 @@ def validate_same_course_collision(candidates, eps_ft=BOND_COLLISION_EPS_FT):
     no' (ex.: nao deveria acontecer hoje, mas protege o futuro preenchimento
     da Etapa 6 reusando esta funcao) nunca contam como colisao entre si.
 
-    Devolve a lista de pares de INDICES (i, j) em `candidates` que colidem -
-    vazia significa nenhuma colisao encontrada."""
+    Devolve a lista de pares de INDICES (i, j) em `candidates` que colidem,
+    ordenada por (i, j) - vazia significa nenhuma colisao encontrada.
+
+    DESEMPENHO (2026-08-27): o filtro por fiada e o pre-filtro geometrico
+    saem na frente do SAT (`_obb_overlap`), que e' de longe a parte cara -
+    primeiro separa as pecas por FIADA (pecas de fiadas diferentes nunca
+    colidem entre si, entao nem entram no mesmo lote), depois usa o indice
+    espacial de `_collision_candidate_pairs` dentro de cada lote. As REGRAS
+    testadas (mesma fiada, mesmo no' isento, SAT com `eps_ft`) e o
+    resultado sao exatamente os de antes; so' os pares que nao tinham como
+    colidir deixaram de ser visitados."""
     collisions = []
-    n = len(candidates)
-    for i in range(n):
-        for j in range(i + 1, n):
-            if candidates[i]["course"] != candidates[j]["course"]:
+    if len(candidates) < 2:
+        return collisions
+
+    obbs = [_candidate_obb(c) for c in candidates]
+    boxes = [_obb_aabb(obb) for obb in obbs]
+
+    by_course = {}
+    for i, cand in enumerate(candidates):
+        course = cand["course"]
+        bucket = by_course.get(course)
+        if bucket is None:
+            by_course[course] = [i]
+        else:
+            bucket.append(i)
+
+    # `eps_ft` pode ser negativo (ver `_obb_overlap`: tolerancia negativa
+    # aceita uma folga pequena como "sobreposto o suficiente"), e nesse caso
+    # o pre-filtro precisa ser MAIS folgado, nao mais apertado - por isso o
+    # valor absoluto.
+    margin_ft = abs(eps_ft)
+    for indexes in by_course.values():
+        for i, j in _collision_candidate_pairs(indexes, boxes, margin_ft):
+            node_index = candidates[i].get("node_index")
+            if node_index is not None and node_index == candidates[j].get("node_index"):
                 continue
-            if (candidates[i].get("node_index") is not None
-                    and candidates[i]["node_index"] == candidates[j].get("node_index")):
-                continue
-            obb_i = _candidate_obb(candidates[i])
-            obb_j = _candidate_obb(candidates[j])
-            if _obb_overlap(obb_i, obb_j, eps_ft):
+            if _obb_overlap(obbs[i], obbs[j], eps_ft):
                 collisions.append((i, j))
+    collisions.sort()
     return collisions
 
 
@@ -4019,7 +4324,7 @@ def process_walls_one_by_one(walls_to_create, nodes, end_to_node, openings_per_w
                              variants_per_course=1,
                              wall_start_cb=None, wall_result_cb=None,
                              dirty_wall_idxs=None, baseline_per_wall=None,
-                             baseline_candidates=None):
+                             baseline_candidates=None, stage_cb=None):
     """PIPELINE PRINCIPAL (regras #3, #4, #5, #8, #9): processa UMA parede
     de cada vez, na ordem geometrica de `order_walls_for_processing`, e
     para cada uma faz o ciclo completo antes de tocar na proxima:
@@ -4123,6 +4428,9 @@ def process_walls_one_by_one(walls_to_create, nodes, end_to_node, openings_per_w
 
     order = order_walls_for_processing(walls_to_create)
     all_candidates = list(intersections["candidates"])
+    # Espelho espacial de `all_candidates` - alimentado nos MESMOS pontos em
+    # que a lista cresce (ver _placed_index_near_wall).
+    placed_index = _placed_index_add(_placed_index_new(), all_candidates)
     jamb_exceptions = []
     non_modular = []
     alignment_conflicts = []
@@ -4137,9 +4445,9 @@ def process_walls_one_by_one(walls_to_create, nodes, end_to_node, openings_per_w
         # parede limpa vizinha como se nao tivesse nenhum bloco lancado
         # ainda, perdendo o contexto de colisao/encontro contra pecas que
         # de fato existem no baseline.
-        all_candidates.extend(
-            c for c in baseline_candidates if c.get("wall_idx") not in dirty_wall_idxs
-        )
+        seeded = [c for c in baseline_candidates if c.get("wall_idx") not in dirty_wall_idxs]
+        all_candidates.extend(seeded)
+        _placed_index_add(placed_index, seeded)
 
     reach_ft = WALL_COLLISION_REACH_CM / (100.0 / FEET_PER_METER)
 
@@ -4190,9 +4498,9 @@ def process_walls_one_by_one(walls_to_create, nodes, end_to_node, openings_per_w
         wall_p0, _wall_p1, wall_dir, wall_len_ft, _th = _wall_axis_and_length(
             working_walls, wall_idx
         )
-        neighbours = candidates_near_wall(
-            [c for c in all_candidates if c.get("wall_idx") != wall_idx],
-            wall_p0, wall_dir, wall_len_ft, reach_ft,
+        neighbours = _placed_index_near_wall(
+            placed_index, wall_p0, wall_dir, wall_len_ft, reach_ft,
+            exclude_wall_idx=wall_idx,
         )
 
         def _solve(walls_arg, openings_arg, by_end_arg, midspan_arg):
@@ -4295,6 +4603,7 @@ def process_walls_one_by_one(walls_to_create, nodes, end_to_node, openings_per_w
             validation = first_validation
 
         all_candidates.extend(result["candidates"])
+        _placed_index_add(placed_index, result["candidates"])
         jamb_exceptions.extend(result["jamb_exceptions"])
         non_modular.extend(result["non_modular"])
         alignment_conflicts.extend(result.get("alignment_conflicts") or [])
@@ -4327,6 +4636,20 @@ def process_walls_one_by_one(walls_to_create, nodes, end_to_node, openings_per_w
             except Exception:
                 pass
 
+    # ETAPA FINAL - roda DEPOIS da ultima parede, entao nenhum dos callbacks
+    # por parede (wall_start_cb/wall_result_cb/progress_cb) dispara mais aqui.
+    # Ate' 2026-08-27 esse trecho era o mais lento do solver inteiro E o unico
+    # sem nenhum feedback na tela - a combinacao que fazia a janela parecer
+    # travada em 99%. O custo ja foi resolvido (indices espaciais); `stage_cb`
+    # resolve o silencio, para que uma futura regressao de desempenho aqui
+    # apareca como "parado em X" em vez de "travado".
+    if stage_cb is not None:
+        try:
+            stage_cb("verificando colisoes entre todas as pecas")
+        except Exception:
+            pass
+    collisions = validate_same_course_collision(all_candidates)
+
     return {
         "order": order,
         "candidates": all_candidates,
@@ -4334,7 +4657,7 @@ def process_walls_one_by_one(walls_to_create, nodes, end_to_node, openings_per_w
         "jamb_exceptions": jamb_exceptions,
         "non_modular": non_modular,
         "alignment_conflicts": alignment_conflicts,
-        "collisions": validate_same_course_collision(all_candidates),
+        "collisions": collisions,
         "per_wall": per_wall,
         "validations": validations,
         "plans": plans,
@@ -4384,7 +4707,8 @@ def solve_all_wall_fill(walls_to_create, nodes, end_to_node, openings_per_wall,
 def solve_building_blocks(nodes, walls_to_create, end_to_node, openings_per_wall, catalog,
                           allow_compensators=BLOCK_COMPENSATORS_ENABLED_BY_DEFAULT,
                           base_z_abs=None, variants_per_course=1,
-                          progress_cb=None, wall_start_cb=None, wall_result_cb=None):
+                          progress_cb=None, wall_start_cb=None, wall_result_cb=None,
+                          stage_cb=None):
     """Ponto de entrada UNICO da Etapa 4 completa (X -> T -> L -> jambs ->
     trechos livres): roda solve_all_intersections (X/T/L) e depois entrega
     tudo a `process_walls_one_by_one`, que percorre as paredes UMA A UMA na
@@ -4414,11 +4738,19 @@ def solve_building_blocks(nodes, walls_to_create, end_to_node, openings_per_wall
         allow_compensators=allow_compensators, plan_hook=None,
         variants_per_course=variants_per_course,
         progress_cb=progress_cb, wall_start_cb=wall_start_cb, wall_result_cb=wall_result_cb,
+        stage_cb=stage_cb,
     )
-    result["door_void_violations"] = (
-        find_door_void_violations(result["candidates"], walls_to_create, openings_per_wall, base_z_abs)
-        if base_z_abs is not None else []
-    )
+    if base_z_abs is not None:
+        if stage_cb is not None:
+            try:
+                stage_cb("conferindo vaos de porta sem peitoril")
+            except Exception:
+                pass
+        result["door_void_violations"] = find_door_void_violations(
+            result["candidates"], walls_to_create, openings_per_wall, base_z_abs
+        )
+    else:
+        result["door_void_violations"] = []
     return result
 
 
