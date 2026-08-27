@@ -4031,7 +4031,14 @@ class _LiveUpdaterBase(IUpdater):
     # processo e' o cenario que gera novos tipos CLR colidindo com os
     # anteriores; um uuid4 por execucao evita a colisao sem precisar
     # reiniciar o Revit a cada clique.
-    __namespace__ = "ModulacaoAutomatica.LiveUpdaters." + uuid.uuid4().hex
+    # O PREFIXO em si e' arbitrario - e' so' um namespace .NET, exigido
+    # porque o pythonnet precisa gerar um TIPO CLR de verdade para o Revit
+    # aceitar esta classe como IUpdater. Nada le' este valor (o registro do
+    # updater e' por `UpdaterId(addin_id, updater_guid)`, um GUID); quem
+    # carrega a funcao e' o sufixo uuid4, ver acima. Renomeado de
+    # "ModulacaoAutomatica." em 2026-08-27, quando o repositorio de mesmo
+    # nome foi desativado - o nome antigo confundia leitor com o repo.
+    __namespace__ = "PyRevitModulacao.LiveUpdaters." + uuid.uuid4().hex
 
     def __init__(self, addin_id, updater_guid):
         self._updater_id = UpdaterId(addin_id, updater_guid)
@@ -7877,7 +7884,7 @@ class _PostCreationEventHandler(IExternalEventHandler):
     # CADA EXECUCAO do Script.py, senao o pythonnet reutiliza/colide com o
     # tipo CLR gerado pela execucao anterior desta MESMA classe no mesmo
     # processo do engine CPython.
-    __namespace__ = "ModulacaoAutomatica.PostCreationEventHandler." + uuid.uuid4().hex
+    __namespace__ = "PyRevitModulacao.PostCreationEventHandler." + uuid.uuid4().hex
 
     def __init__(self):
         self.action = None

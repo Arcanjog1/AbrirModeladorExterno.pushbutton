@@ -16,6 +16,5 @@ clicar no botao, `script.py` baixa a versao mais recente do GitHub para:
 ```
 
 Se o GitHub ou a internet falhar, o loader usa a ultima copia completa em
-cache. A copia propria de `nuvem/core/` tambem e' baixada para o mesmo
-cache, porque o modelador externo reaproveita funcoes do motor principal sem
-depender de outro repositorio.
+cache. O modelador externo nao baixa nem importa nada de outro `.pushbutton`;
+as pequenas funcoes compartilhadas vivem duplicadas em `nuvem/`.
