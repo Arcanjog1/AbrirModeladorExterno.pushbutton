@@ -150,7 +150,7 @@ def _new_web_client(token, accept):
     return client
 
 
-def _raise_for_web_exception(web_error, context):
+def _raise_for_web_exception(web_error, context, token=None):
     status_code = None
     if web_error.Response is not None:
         try:
@@ -158,11 +158,18 @@ def _raise_for_web_exception(web_error, context):
         except Exception:
             status_code = None
     if status_code == 401:
-        raise RuntimeError("Token invalido ou expirado (HTTP 401).")
+        if token:
+            raise RuntimeError("Token salvo invalido ou expirado (HTTP 401).")
+        raise RuntimeError("GitHub recusou a requisicao publica (HTTP 401).")
     if status_code == 403:
+        if token:
+            raise RuntimeError(
+                "Acesso negado com o token salvo - permissao insuficiente "
+                "ou limite de requisicoes do GitHub atingido (HTTP 403)."
+            )
         raise RuntimeError(
-            "Acesso negado - token sem permissao de leitura neste repositorio "
-            "ou limite de requisicoes do GitHub atingido (HTTP 403)."
+            "GitHub recusou o acesso publico ou o limite de requisicoes foi "
+            "atingido (HTTP 403)."
         )
     if status_code == 404:
         raise RuntimeError(
@@ -176,7 +183,7 @@ def _list_remote_files(token):
     try:
         raw = client.DownloadString(TREE_API_URL)
     except WebException as web_error:
-        _raise_for_web_exception(web_error, "listagem da arvore do repositorio")
+        _raise_for_web_exception(web_error, "listagem da arvore do repositorio", token)
 
     data = json.loads(raw)
     if data.get("truncated"):
@@ -200,7 +207,7 @@ def _fetch_file_bytes(token, repo_path):
     try:
         return client.DownloadData(_contents_api_url(repo_path))
     except WebException as web_error:
-        _raise_for_web_exception(web_error, repo_path)
+        _raise_for_web_exception(web_error, repo_path, token)
 
 
 def _write_bytes(path, data):
@@ -244,10 +251,10 @@ def _load_entry_point():
         if "401" in error_text or "403" in error_text:
             if token:
                 _forget_token()
-            retry_token = _ask_for_token()
-            if retry_token:
+                # O repositorio e' publico: se um token salvo falhar, volta para
+                # o fluxo anonimo em vez de pedir um PAT ao usuario.
                 try:
-                    return _sync_package(retry_token)
+                    return _sync_package(None)
                 except Exception as second_error:
                     first_error = second_error
 
