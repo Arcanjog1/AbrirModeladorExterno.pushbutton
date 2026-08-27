@@ -4,3 +4,5 @@ __pycache__/
 .vs/
 .vscode/
 *.log
+.pytest_cache/
+.claude/
