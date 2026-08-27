@@ -1,513 +1,306 @@
 #! python3
 # -*- coding: utf-8 -*-
-"""Abrir Modelador Externo - PushButton independente.
+"""LOADER - Abrir Modelador Externo.
 
-Ver o plano da "arquitetura do modelador externo" (2026-08-26,
-C:\\Users\\CIVIX\\.claude\\plans\\stateful-tickling-thunder.md): em vez de
-criar paredes/blocos reais direto no Revit, este botao so' CAPTURA os
-dados necessarios (linhas do CAD por layer, aberturas ja colocadas,
-catalogo fixo de blocos) e exporta um JSON que o modelador externo
-(ModulacaoVisualizador3D, projeto irmao, fora do Revit) consome para fazer
-TODO o processamento pesado (correcao de paredes, modulacao de blocos) de
-forma interativa, sem escrever nada no Revit ate' o usuario aprovar e
-clicar em "Enviar para o Revit" (fase futura, ainda nao implementada
-nem neste botao nem no modelador externo).
-
-Este repositorio contem sua propria copia de core/ com as funcoes de
-captura/modelagem necessarias: extract_lines_by_layer,
-get_openings_from_selection, load_fixed_block_catalog e os tipos/constantes
-necessarios para validar Walls selecionadas. A conversao para o schema JSON
-puro mora em core/capture_export.py nesta mesma pasta, evitando qualquer
-dependencia de MeuBotao.pushbutton.
-
-ATENCAO - NAO TESTADO AO VIVO dentro do Revit (pedido explicito do
-usuario, 2026-08-26: outra sessao estava usando a mesma conexao MCP com o
-Revit neste momento, entao a verificacao ficou limitada a
-`py -m py_compile` deste arquivo e aos testes automatizados de
-core/capture_export.py). Validar na pratica (escolher um CAD real,
-conferir o JSON gerado) antes de confiar no resultado.
+Este arquivo e' a unica parte que precisa existir fisicamente solta na pasta
+do botao do pyRevit. A cada clique, ele tenta baixar do GitHub a versao mais
+recente de tudo que fica em `nuvem/` (motor real, exportador JSON e
+`ModulacaoVisualizador3D/`) e da copia propria de `core/` dentro deste
+repositorio. Se a rede falhar, roda a ultima sincronizacao completa em cache
+local. A pasta `nuvem/` pode ser apagada localmente.
 """
+
+import io
 import json
 import os
+import shutil
 import sys
-import tempfile
-import time
+import traceback
 
-from pyrevit import forms, revit, script
+import clr
+clr.AddReference("System")
+clr.AddReference("System.Security")
+
+from System.Net import ServicePointManager, SecurityProtocolType, WebClient, WebException
+from System.Security.Cryptography import ProtectedData, DataProtectionScope
+from System.Text import Encoding
+from System.IO import File as DotNetFile
+
+from pyrevit import forms
+
+try:
+    ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
+except Exception:
+    pass
 
 
-def _patch_pyrevit_forms_for_cpython():
+GITHUB_OWNER = "Arcanjog1"
+GITHUB_REPO = "AbrirModeladorExterno.pushbutton"
+GITHUB_BRANCH = "main"
+
+EXTERNAL_CLOUD_DIR = "nuvem"
+CORE_REPO_PREFIX = EXTERNAL_CLOUD_DIR + "/core/"
+ENTRY_POINT_REPO_PATH = EXTERNAL_CLOUD_DIR + "/external_modelador.py"
+
+TREE_API_URL = "https://api.github.com/repos/{0}/{1}/git/trees/{2}?recursive=1".format(
+    GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH
+)
+
+APP_DATA_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AbrirModeladorExternoPushbutton"
+)
+TOKEN_FILE = os.path.join(APP_DATA_DIR, "token.dat")
+CACHE_ROOT = os.path.join(APP_DATA_DIR, "external_modelador_cache")
+CACHE_TMP_ROOT = os.path.join(APP_DATA_DIR, "external_modelador_cache_tmp")
+
+
+def _contents_api_url(repo_path):
+    return "https://api.github.com/repos/{0}/{1}/contents/{2}?ref={3}".format(
+        GITHUB_OWNER, GITHUB_REPO, repo_path, GITHUB_BRANCH
+    )
+
+
+def _txt(value):
+    return value if isinstance(value, str) else str(value)
+
+
+def _alert(message, title="Modelador Externo"):
     try:
-        import clr
-        clr.AddReference("System.Windows.Forms")
-        clr.AddReference("System.Drawing")
+        forms.alert(_txt(message), title=title)
     except Exception:
-        return
-
-    from System.Windows.Forms import (
-        Form, Label, TextBox, Button, ListBox, DialogResult,
-        FormStartPosition, FormBorderStyle, MessageBox, MessageBoxButtons,
-        MessageBoxIcon, SelectionMode, SaveFileDialog, OpenFileDialog,
-        FolderBrowserDialog,
-    )
-
-    def _txt(value):
-        return value if isinstance(value, str) else str(value)
-
-    def _compat_alert(msg, title=None, exitscript=False, yes=False, no=False, **kwargs):
-        caption = _txt(title) if title else "Modulacao Automatica"
-        if yes or no:
-            result = MessageBox.Show(
-                _txt(msg), caption, MessageBoxButtons.YesNo, MessageBoxIcon.Question
-            )
-            return result == DialogResult.Yes
-        MessageBox.Show(_txt(msg), caption, MessageBoxButtons.OK, MessageBoxIcon.Information)
-        if exitscript:
-            sys.exit()
-        return None
-
-    def _compat_ask_for_string(default="", prompt="", title="", **kwargs):
-        form = Form()
-        form.Text = _txt(title) if title else "Modulacao Automatica"
-        form.StartPosition = FormStartPosition.CenterScreen
-        form.FormBorderStyle = FormBorderStyle.FixedDialog
-        form.MinimizeBox = False
-        form.MaximizeBox = False
-        form.Width = 460
-        form.Height = 180
-
-        label = Label()
-        label.Text = _txt(prompt) if prompt else ""
-        label.SetBounds(12, 12, 420, 60)
-        label.AutoSize = False
-        form.Controls.Add(label)
-
-        textbox = TextBox()
-        textbox.SetBounds(12, 78, 420, 24)
-        textbox.Text = _txt(default) if default else ""
-        form.Controls.Add(textbox)
-
-        ok_button = Button()
-        ok_button.Text = "OK"
-        ok_button.DialogResult = DialogResult.OK
-        ok_button.SetBounds(276, 112, 75, 28)
-        form.Controls.Add(ok_button)
-
-        cancel_button = Button()
-        cancel_button.Text = "Cancelar"
-        cancel_button.DialogResult = DialogResult.Cancel
-        cancel_button.SetBounds(357, 112, 75, 28)
-        form.Controls.Add(cancel_button)
-
-        form.AcceptButton = ok_button
-        form.CancelButton = cancel_button
-
-        result = form.ShowDialog()
-        if result == DialogResult.OK:
-            return textbox.Text
-        return None
-
-    def _compat_select_from_list(items, title="", button_name="OK", multiselect=False, **kwargs):
-        items = list(items)
-        if not items:
-            return [] if multiselect else None
-
-        form = Form()
-        form.Text = _txt(title) if title else "Modulacao Automatica"
-        form.StartPosition = FormStartPosition.CenterScreen
-        form.FormBorderStyle = FormBorderStyle.FixedDialog
-        form.MinimizeBox = False
-        form.MaximizeBox = False
-        form.Width = 420
-        form.Height = 420
-
-        listbox = ListBox()
-        listbox.SetBounds(12, 12, 380, 300)
-        listbox.SelectionMode = (
-            SelectionMode.MultiExtended if multiselect else SelectionMode.One
-        )
-        for item in items:
-            listbox.Items.Add(_txt(item))
-        listbox.SetSelected(0, True)
-        form.Controls.Add(listbox)
-
-        ok_button = Button()
-        ok_button.Text = _txt(button_name) if button_name else "OK"
-        ok_button.DialogResult = DialogResult.OK
-        ok_button.SetBounds(216, 324, 75, 28)
-        form.Controls.Add(ok_button)
-
-        cancel_button = Button()
-        cancel_button.Text = "Cancelar"
-        cancel_button.DialogResult = DialogResult.Cancel
-        cancel_button.SetBounds(297, 324, 75, 28)
-        form.Controls.Add(cancel_button)
-
-        form.AcceptButton = ok_button
-        form.CancelButton = cancel_button
-
-        result = form.ShowDialog()
-        if result != DialogResult.OK:
-            return None
-
-        selected_indices = list(listbox.SelectedIndices)
-        if not selected_indices:
-            return None
-        selected_items = [items[i] for i in selected_indices]
-        return selected_items if multiselect else selected_items[0]
-
-    class _CompatSelectFromList(object):
-        @staticmethod
-        def show(items, **kwargs):
-            return _compat_select_from_list(items, **kwargs)
-
-    def _compat_save_file(file_ext="", default_name="", title="", **kwargs):
-        dialog = SaveFileDialog()
-        dialog.Title = _txt(title) if title else "Salvar arquivo de captura"
-        if file_ext:
-            ext = _txt(file_ext).lstrip(".")
-            dialog.Filter = "{0} files (*.{1})|*.{1}|All files (*.*)|*.*".format(ext.upper(), ext)
-            dialog.DefaultExt = ext
-            dialog.AddExtension = True
-        else:
-            dialog.Filter = "All files (*.*)|*.*"
-        if default_name:
-            dialog.FileName = _txt(default_name)
-        dialog.RestoreDirectory = True
-        result = dialog.ShowDialog()
-        if result == DialogResult.OK:
-            return dialog.FileName
-        return None
-
-    def _compat_pick_file(file_ext="", title="", **kwargs):
-        dialog = OpenFileDialog()
-        dialog.Title = _txt(title) if title else "Selecionar arquivo"
-        if file_ext:
-            ext = _txt(file_ext).lstrip(".")
-            dialog.Filter = "{0} files (*.{1})|*.{1}|All files (*.*)|*.*".format(ext.upper(), ext)
-            dialog.DefaultExt = ext
-        else:
-            dialog.Filter = "All files (*.*)|*.*"
-        dialog.RestoreDirectory = True
-        result = dialog.ShowDialog()
-        if result == DialogResult.OK:
-            return dialog.FileName
-        return None
-
-    def _compat_pick_folder(title="", **kwargs):
-        dialog = FolderBrowserDialog()
-        if title:
-            dialog.Description = _txt(title)
-        result = dialog.ShowDialog()
-        if result == DialogResult.OK:
-            return dialog.SelectedPath
-        return None
-
-    forms.alert = _compat_alert
-    forms.ask_for_string = _compat_ask_for_string
-    forms.SelectFromList = _CompatSelectFromList
-    forms.save_file = _compat_save_file
-    forms.pick_file = _compat_pick_file
-    forms.pick_folder = _compat_pick_folder
-
-
-_patch_pyrevit_forms_for_cpython()
-
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_PANEL_ROOT = os.path.dirname(_HERE)
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from core import capture_export  # noqa: E402 - precisa do sys.path acima
-from core import wall_modeling  # noqa: E402
-
-doc = revit.doc
-uidoc = revit.uidoc
-
-output = script.get_output()
-
-
-def main():
-    cad_ref = revit.pick_element("Selecione a planta baixa/importacao/vinculo do AutoCAD")
-    if not cad_ref:
-        return
-
-    # 2. Extrai as linhas por Layer (MESMA funcao do botao real).
-    options = wall_modeling.Options()
-    options.IncludeNonVisibleObjects = True
-    geom_element = cad_ref.get_Geometry(options)
-    if geom_element is None:
-        forms.alert(
-            "O elemento selecionado nao possui geometria (nao parece ser um CAD).",
-            exitscript=True,
-        )
-        return
-
-    cad_lines_by_layer = {}
-    wall_modeling.extract_lines_by_layer(geom_element, cad_lines_by_layer)
-    if not cad_lines_by_layer:
-        forms.alert(
-            "Nenhuma linha valida foi encontrada no CAD selecionado.\n"
-            "Verifique se o elemento e' realmente um vinculo/importacao de CAD "
-            "e se ha linhas retas (LINE) visiveis nele.",
-            exitscript=True,
-        )
-        return
-
-    selected_walls, skipped_walls = _select_revit_walls()
-    if selected_walls is None:
-        return
-    if not selected_walls:
-        forms.alert(
-            "Nenhuma Wall valida foi selecionada. Selecione paredes com eixo "
-            "LocationCurve e tente novamente.",
-            title="Modelador Externo",
-        )
-        return
-
-    output.print_md("**Selecionando aberturas (portas/janelas)...**")
-    all_openings, skipped_openings, estimated_openings = wall_modeling.get_openings_from_selection()
-    if all_openings is None:
-        return
-
-    openings_source_note = (
-        "selecao manual: {} abertura(s), {} ignorada(s), {} estimada(s) por bounding box"
-        .format(len(all_openings), skipped_openings, estimated_openings)
-    )
-    output.print_md("- {}".format(openings_source_note))
-
-    # 5. Catalogo fixo de blocos (MESMA funcao do botao real) - precisa do
-    # projeto ja ter os tipos de bloco carregados, exatamente como a
-    # Etapa 1 do botao real ja exige hoje.
-    output.print_md("**Carregando catalogo fixo de blocos...**")
-    catalog, missing = wall_modeling.load_fixed_block_catalog(doc)
-    if missing:
-        missing_desc = "\n".join(
-            "- {} / {}: {}".format(m["family_name"], m["type_name"], m["reason"])
-            for m in missing
-        )
-        proceed = forms.alert(
-            "Alguns tipos de bloco do catalogo fixo nao foram encontrados no "
-            "projeto:\n\n{}\n\n"
-            "Continuar mesmo assim? (o modelador externo so' vai poder "
-            "desenhar/modular com os blocos ENCONTRADOS)".format(missing_desc),
-            yes=True, no=True,
-        )
-        if not proceed:
-            return
-
-    segments = capture_export.lines_by_layer_to_segments_cm(cad_lines_by_layer)
-    walls_json = capture_export.walls_to_json(
-        selected_walls,
-        doc=doc,
-        height_param_id=wall_modeling.BuiltInParameter.WALL_USER_HEIGHT_PARAM,
-    )
-    openings_json = capture_export.openings_to_json(all_openings)
-    catalog_json = capture_export.catalog_to_json(catalog)
-    setup = _build_setup_from_selected_walls(walls_json)
-
-    payload = capture_export.build_capture_payload(
-        segments=segments,
-        walls_json=walls_json,
-        openings_json=openings_json,
-        catalog_json=catalog_json,
-        setup=setup,
-        level_name=setup.get("level") or "",
-        source_label=doc.Title,
-    )
-
-    save_path = os.path.join(
-        tempfile.gettempdir(),
-        "{}_captura_modelador_externo_{}.json".format(
-            _safe_filename(os.path.splitext(doc.Title)[0] or "modulacao"),
-            time.strftime("%Y%m%d_%H%M%S"),
-        ),
-    )
-
-    with open(save_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-
-    output.print_md(
-        "**Captura salva em:** `{}`\n\n"
-        "- **Segmentos da planta baixa:** {}\n"
-        "- **Walls selecionadas:** {}{}\n"
-        "- **Aberturas coletadas:** {}\n"
-        "- **Tipos de bloco no catalogo:** {}\n\n"
-        "**Abrindo o Modelador 3D externo automaticamente...**".format(
-            save_path,
-            len(segments),
-            len(walls_json),
-            " ({} elemento(s) ignorado(s))".format(skipped_walls) if skipped_walls else "",
-            len(openings_json),
-            len(catalog_json),
-        )
-    )
-
-    launched = _launch_visualizer(save_path)
-    if launched:
-        output.print_md("Visualizador 3D aberto no navegador com a planta e modulação já carregadas.")
-
-
-def _select_revit_walls():
-    try:
-        refs = uidoc.Selection.PickObjects(
-            wall_modeling.ObjectType.Element,
-            "Selecione as Walls existentes e clique em Concluir"
-        )
-    except Exception:
-        return None, 0
-
-    walls = []
-    skipped = 0
-    for ref in refs:
-        element = doc.GetElement(ref.ElementId)
-        if not isinstance(element, wall_modeling.Wall):
-            skipped += 1
-            continue
-        location = getattr(element, "Location", None)
-        if not isinstance(location, wall_modeling.LocationCurve):
-            skipped += 1
-            continue
-        curve = getattr(location, "Curve", None)
         try:
-            if curve is None or curve.Length < wall_modeling.MIN_SEGMENT_LENGTH_FT:
-                skipped += 1
-                continue
+            clr.AddReference("System.Windows.Forms")
+            from System.Windows.Forms import MessageBox
+            MessageBox.Show(_txt(message))
         except Exception:
-            skipped += 1
+            pass
+
+
+def _ask_for_string(default="", prompt="", title=""):
+    try:
+        return forms.ask_for_string(default=default, prompt=prompt, title=title)
+    except Exception:
+        try:
+            clr.AddReference("Microsoft.VisualBasic")
+            from Microsoft.VisualBasic import Interaction
+            value = Interaction.InputBox(_txt(prompt), _txt(title), _txt(default))
+            return value if value else None
+        except Exception:
+            return None
+
+
+def _ensure_app_data_dir():
+    if not os.path.isdir(APP_DATA_DIR):
+        os.makedirs(APP_DATA_DIR)
+
+
+def _save_token(token):
+    _ensure_app_data_dir()
+    raw_bytes = Encoding.GetEncoding("UTF-8").GetBytes(token)
+    protected_bytes = ProtectedData.Protect(raw_bytes, None, DataProtectionScope.CurrentUser)
+    DotNetFile.WriteAllBytes(TOKEN_FILE, protected_bytes)
+
+
+def _load_token():
+    if not os.path.isfile(TOKEN_FILE):
+        return None
+    try:
+        protected_bytes = DotNetFile.ReadAllBytes(TOKEN_FILE)
+        raw_bytes = ProtectedData.Unprotect(protected_bytes, None, DataProtectionScope.CurrentUser)
+        return Encoding.GetEncoding("UTF-8").GetString(raw_bytes)
+    except Exception:
+        return None
+
+
+def _forget_token():
+    try:
+        if os.path.isfile(TOKEN_FILE):
+            os.remove(TOKEN_FILE)
+    except Exception:
+        pass
+
+
+def _ask_for_token():
+    token = _ask_for_string(
+        default="",
+        prompt=(
+            "Cole aqui o seu GitHub Personal Access Token (fine-grained, "
+            "somente leitura de 'Contents' no repositorio {0}/{1}).\n\n"
+            "O repositorio publico baixa sem token; ele so' e' necessario se "
+            "houver limite de requisicoes ou se o repositorio voltar a ficar privado."
+        ).format(GITHUB_OWNER, GITHUB_REPO),
+        title="Modelador Externo - autenticacao necessaria",
+    )
+    if token:
+        token = token.strip()
+    if not token:
+        return None
+    _save_token(token)
+    return token
+
+
+def _new_web_client(token, accept):
+    client = WebClient()
+    client.Encoding = Encoding.GetEncoding("UTF-8")
+    if token:
+        client.Headers.Add("Authorization", "Bearer " + token)
+    client.Headers.Add("Accept", accept)
+    client.Headers.Add("User-Agent", "AbrirModeladorExternoPushbutton-Loader")
+    client.Headers.Add("X-GitHub-Api-Version", "2022-11-28")
+    return client
+
+
+def _raise_for_web_exception(web_error, context):
+    status_code = None
+    if web_error.Response is not None:
+        try:
+            status_code = int(web_error.Response.StatusCode)
+        except Exception:
+            status_code = None
+    if status_code == 401:
+        raise RuntimeError("Token invalido ou expirado (HTTP 401).")
+    if status_code == 403:
+        raise RuntimeError(
+            "Acesso negado - token sem permissao de leitura neste repositorio "
+            "ou limite de requisicoes do GitHub atingido (HTTP 403)."
+        )
+    if status_code == 404:
+        raise RuntimeError(
+            "{0} nao encontrado no repositorio (HTTP 404).".format(context)
+        )
+    raise RuntimeError("Falha ao contatar o GitHub ({0}): {1}".format(context, web_error.Message))
+
+
+def _list_remote_files(token):
+    client = _new_web_client(token, "application/vnd.github+json")
+    try:
+        raw = client.DownloadString(TREE_API_URL)
+    except WebException as web_error:
+        _raise_for_web_exception(web_error, "listagem da arvore do repositorio")
+
+    data = json.loads(raw)
+    if data.get("truncated"):
+        raise RuntimeError("A API do GitHub truncou a listagem da arvore do repositorio.")
+
+    files = []
+    for entry in data.get("tree", []):
+        repo_path = entry.get("path", "")
+        if entry.get("type") != "blob":
             continue
-        walls.append(element)
-    return walls, skipped
+        if repo_path.startswith(EXTERNAL_CLOUD_DIR + "/") or repo_path.startswith(CORE_REPO_PREFIX):
+            files.append(repo_path)
+
+    if ENTRY_POINT_REPO_PATH not in files:
+        raise RuntimeError("external_modelador.py nao apareceu na listagem do GitHub.")
+    return files
 
 
-def _build_setup_from_selected_walls(walls_json):
-    thicknesses = sorted(set(
-        round(w["thickness_cm"], 1)
-        for w in walls_json
-        if w.get("thickness_cm") and w["thickness_cm"] > 0
-    ))
-    level_votes = {}
-    max_height_cm = 0.0
-    for wall in walls_json:
-        level = wall.get("level") or ""
-        if level:
-            level_votes[level] = level_votes.get(level, 0) + 1
-        height = wall.get("height_cm") or 0.0
-        if height > max_height_cm:
-            max_height_cm = height
-    level = max(level_votes.items(), key=lambda item: item[1])[0] if level_votes else ""
-    return {
-        "layer": None,
-        "thicknesses_cm": thicknesses,
-        "level": level,
-        "height_m": (max_height_cm / 100.0) if max_height_cm else None,
-        "openings_mode": "pick",
-        "wall_source_mode": "revit_walls",
-    }
+def _fetch_file_bytes(token, repo_path):
+    client = _new_web_client(token, "application/vnd.github.raw")
+    try:
+        return client.DownloadData(_contents_api_url(repo_path))
+    except WebException as web_error:
+        _raise_for_web_exception(web_error, repo_path)
 
 
-def _safe_filename(value):
-    chars = []
-    for ch in value:
-        chars.append(ch if (ch.isalnum() or ch in ("-", "_")) else "_")
-    return "".join(chars).strip("_") or "modulacao"
+def _write_bytes(path, data):
+    parent = os.path.dirname(path)
+    if not os.path.isdir(parent):
+        os.makedirs(parent)
+    DotNetFile.WriteAllBytes(path, data)
 
 
-def _find_visualizer_dir():
-    env_dir = os.environ.get("MODULACAO_VISUALIZADOR_PATH")
-    if env_dir and os.path.isdir(env_dir) and os.path.isfile(os.path.join(env_dir, "server.py")):
-        return env_dir
+def _sync_package(token):
+    files = _list_remote_files(token)
 
-    candidates = [
-        r"C:\Users\CIVIX\OneDrive\Área de Trabalho\Github\ModulacaoVisualizador3D",
-        r"C:\Users\CIVIX\OneDrive\Área de Trabalho\Nova pasta\ModulacaoVisualizador3D",
-        r"C:\Users\CIVIX\OneDrive\Área de Trabalho\ModulacaoVisualizador3D",
-        os.path.normpath(os.path.join(_PANEL_ROOT, "..", "..", "..", "Github", "ModulacaoVisualizador3D")),
-        os.path.normpath(os.path.join(_PANEL_ROOT, "..", "..", "..", "Nova pasta", "ModulacaoVisualizador3D")),
-        os.path.normpath(os.path.join(_PANEL_ROOT, "..", "..", "..", "ModulacaoVisualizador3D")),
-        os.path.normpath(os.path.join(_PANEL_ROOT, "..", "..", "ModulacaoVisualizador3D")),
-    ]
-    for c in candidates:
-        if os.path.isdir(c) and os.path.isfile(os.path.join(c, "server.py")):
-            return os.path.abspath(c)
+    if os.path.isdir(CACHE_TMP_ROOT):
+        shutil.rmtree(CACHE_TMP_ROOT)
+    os.makedirs(CACHE_TMP_ROOT)
+
+    for repo_path in files:
+        local_path = os.path.join(CACHE_TMP_ROOT, *repo_path.split("/"))
+        _write_bytes(local_path, _fetch_file_bytes(token, repo_path))
+
+    if os.path.isdir(CACHE_ROOT):
+        shutil.rmtree(CACHE_ROOT)
+    os.rename(CACHE_TMP_ROOT, CACHE_ROOT)
+
+    return os.path.join(CACHE_ROOT, *ENTRY_POINT_REPO_PATH.split("/"))
+
+
+def _entry_point_from_existing_cache():
+    entry_point = os.path.join(CACHE_ROOT, *ENTRY_POINT_REPO_PATH.split("/"))
+    if os.path.isfile(entry_point):
+        return entry_point
     return None
 
 
-def _is_server_running(port=8080):
-    import socket
-    s = socket.socket()
-    s.settimeout(0.3)
+def _load_entry_point():
+    token = _load_token()
     try:
-        return s.connect_ex(("127.0.0.1", port)) == 0
-    except Exception:
-        return False
-    finally:
-        s.close()
+        return _sync_package(token)
+    except Exception as first_error:
+        error_text = str(first_error)
+        if "401" in error_text or "403" in error_text:
+            if token:
+                _forget_token()
+            retry_token = _ask_for_token()
+            if retry_token:
+                try:
+                    return _sync_package(retry_token)
+                except Exception as second_error:
+                    first_error = second_error
 
-
-def _launch_visualizer(json_path, port=8080):
-    import subprocess
-    import time
-    try:
-        import urllib.parse as urlparse
-    except ImportError:
-        import urllib as urlparse
-
-    vis_dir = _find_visualizer_dir()
-    if not vis_dir:
-        forms.alert(
-            "Pasta do ModulacaoVisualizador3D nao encontrada.\n"
-            "Verifique se o visualizador esta' em 'Github\\ModulacaoVisualizador3D' "
-            "ou configure MODULACAO_VISUALIZADOR_PATH.",
-            title="Modelador Externo",
-        )
-        return False
-
-    if not _is_server_running(port):
-        server_py = os.path.join(vis_dir, "server.py")
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NO_WINDOW = 0x08000000
-        flags = DETACHED_PROCESS | CREATE_NO_WINDOW
-
-        try:
-            subprocess.Popen(
-                ["py", "server.py", str(port)],
-                cwd=vis_dir,
-                creationflags=flags,
-                shell=True,
-                close_fds=True,
+        cached_entry = _entry_point_from_existing_cache()
+        if cached_entry:
+            _alert(
+                "Nao foi possivel baixar a versao mais recente do GitHub:\n\n"
+                "{0}\n\nRodando a ultima copia em cache (pode estar desatualizada).".format(
+                    first_error
+                ),
+                title="Modelador Externo - usando cache",
             )
-        except Exception:
-            try:
-                subprocess.Popen(
-                    [sys.executable, server_py, str(port)],
-                    cwd=vis_dir,
-                    creationflags=flags,
-                    close_fds=True,
-                )
-            except Exception:
-                pass
+            return cached_entry
 
-        for _ in range(25):
-            time.sleep(0.1)
-            if _is_server_running(port):
-                break
-
-    abs_path = os.path.abspath(json_path)
-    try:
-        quote_fn = urlparse.quote
-    except AttributeError:
-        quote_fn = lambda s: s.replace(" ", "%20")
-    encoded_path = quote_fn(abs_path)
-    url = "http://localhost:{}/?capture={}".format(port, encoded_path)
-
-    try:
-        import webbrowser
-        webbrowser.open(url)
-    except Exception:
-        os.system('start "" "{}"'.format(url))
-    return True
+        _alert(
+            "Nao foi possivel baixar o Modelador Externo do GitHub e nao ha' "
+            "copia em cache neste computador:\n\n{0}".format(first_error),
+            title="Modelador Externo - erro",
+        )
+        sys.exit()
 
 
-if __name__ == "__main__":
-    main()
+_entry_point_path = _load_entry_point()
+_external_root = os.path.dirname(_entry_point_path)
+_core_root = _external_root
+
+for _mod_name in list(sys.modules.keys()):
+    if (
+        _mod_name == "core"
+        or _mod_name.startswith("core.")
+        or _mod_name in ("capture_export_external", "external_modelador")
+    ):
+        del sys.modules[_mod_name]
+
+if _external_root not in sys.path:
+    sys.path.insert(0, _external_root)
+if _core_root not in sys.path:
+    sys.path.insert(0, _core_root)
+
+with io.open(_entry_point_path, "r", encoding="utf-8") as _fh:
+    _source_code = _fh.read()
+
+globals()["__file__"] = _entry_point_path
+
+try:
+    exec(compile(_source_code, _entry_point_path, "exec"), globals())
+except SystemExit:
+    raise
+except Exception:
+    _alert(
+        "O Modelador Externo baixado do GitHub encontrou um erro ao executar:\n\n{0}".format(
+            traceback.format_exc()
+        ),
+        title="Modelador Externo - erro na execucao",
+    )
+    raise

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.lnk
+.git_subrepo_backup/
+server.log
+sample_plan.dxf

@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Visualizador de Modulação Externa</title>
+<style>
+  html, body { margin: 0; height: 100%; font-family: Segoe UI, Arial, sans-serif; background: #1b1d21; color: #e8e8e8; }
+  #app { display: flex; height: 100%; }
+  #sidebar { width: 380px; flex-shrink: 0; padding: 16px; box-sizing: border-box; overflow-y: auto; background: #202226; border-right: 1px solid #333; }
+  #viewport { flex-grow: 1; position: relative; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  label { display: block; font-size: 12px; color: #aaa; margin-top: 10px; }
+  input[type=text], select { width: 100%; box-sizing: border-box; padding: 6px 8px; background: #111; color: #eee; border: 1px solid #444; border-radius: 4px; margin-top: 4px; }
+  button { margin-top: 10px; padding: 8px 12px; background: #2f6fed; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #4783ff; }
+  button.secondary { background: #444; }
+  button.secondary:hover { background: #555; }
+  #status { font-size: 12px; color: #ffb454; margin-top: 10px; white-space: pre-wrap; }
+  #layers-list { font-size: 12px; margin-top: 8px; }
+  .layer-row { border-bottom: 1px solid #333; padding: 6px 0; }
+  .layer-row .layer-name { font-weight: bold; }
+  .layer-row.ok .layer-name::before { content: "[OK] "; color: #8ee08e; }
+  .layer-row.atencao .layer-name::before { content: "[ATENÇÃO] "; color: #ffb454; }
+  .layer-row .layer-detail { color: #999; }
+  .wall-row { border-bottom: 1px solid #333; padding: 8px 0; font-size: 12px; cursor: pointer; }
+  .wall-row:hover { background: #26282c; }
+  .wall-row.ok { color: #8ee08e; }
+  .wall-row.bad { color: #ff9d9d; }
+  .wall-row .blocks { color: #ccc; }
+  #summary { font-size: 12px; margin-top: 12px; padding: 8px; background: #26282c; border-radius: 4px; }
+  #validation-banner { font-size: 12px; margin-top: 12px; padding: 10px; border-radius: 4px; background: #3a2a1a; border: 1px solid #a35a1a; color: #ffcf8e; white-space: pre-wrap; }
+  #validation-banner:empty { display: none; }
+  canvas { display: block; }
+  #legend { position: absolute; bottom: 12px; left: 12px; font-size: 12px; background: rgba(0,0,0,0.5); padding: 8px 10px; border-radius: 4px; }
+  #legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: middle; }
+  #view-toolbar { position: absolute; top: 12px; left: 12px; display: flex; gap: 6px; z-index: 2; }
+  #view-toolbar button { margin-top: 0; padding: 6px 10px; font-size: 12px; background: #333; }
+  #view-toolbar button:hover { background: #444; }
+  #nav-hint { position: absolute; bottom: 12px; right: 12px; font-size: 11px; color: #888; background: rgba(0,0,0,0.5); padding: 6px 10px; border-radius: 4px; }
+  .checkbox-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #ddd; margin-top: 4px; }
+  .checkbox-row input { width: auto; margin: 0; }
+  #layer-toggles { max-height: 140px; overflow-y: auto; margin-top: 4px; background: #111; border: 1px solid #333; border-radius: 4px; padding: 6px 8px; }
+  #layer-toggles .hint { font-size: 12px; color: #777; }
+  #selection-panel { font-size: 12px; margin-top: 12px; padding: 8px; background: #26282c; border-radius: 4px; }
+  #selection-panel:empty { display: none; }
+  #selection-panel .sel-title { font-weight: bold; color: #8fc7ff; margin-bottom: 4px; }
+  #selection-panel .sel-row { color: #ccc; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h1>Modulação externa — visualizador local</h1>
+
+    <button id="btn-pick-dwg">Selecionar DWG</button>
+    <button id="btn-pick-json" style="background:#00897b; margin-top:6px;">Selecionar Captura do Revit (JSON)</button>
+
+    <label>Caminho do arquivo (DXF ou JSON)</label>
+    <input type="text" id="dxf-path" placeholder="C:\caminho\para\captura.json ou planta.dxf">
+
+    <label>Layer(s) das paredes (separadas por vírgula, opcional)</label>
+    <input type="text" id="wall-layers" placeholder="A-WALL, ARQ-PAREDE">
+
+    <label>Unidade/escala do desenho</label>
+    <select id="unit-scale">
+      <option value="">Automático (cabeçalho $INSUNITS do DXF)</option>
+      <option value="1">Já está em centímetros (1cm = 1cm)</option>
+      <option value="0.1">Milímetros (1mm = 0.1cm)</option>
+      <option value="100">Metros (1m = 100cm)</option>
+      <option value="2.54">Polegadas</option>
+      <option value="30.48">Pés</option>
+    </select>
+
+    <button id="btn-layers" class="secondary">Analisar layers do arquivo</button>
+    <div id="layers-list"></div>
+
+    <button id="btn-load">Gerar modulação</button>
+    <button id="btn-auto-adjust" class="secondary" disabled>Ajustar paredes incompatíveis</button>
+
+    <div id="status"></div>
+    <div id="validation-banner"></div>
+    <div id="summary"></div>
+
+    <label>Modos de visualização</label>
+    <div id="view-modes">
+      <label class="checkbox-row"><input type="checkbox" id="mode-plan" checked> Planta CAD / Referência</label>
+      <label class="checkbox-row"><input type="checkbox" id="mode-walls" checked> Walls</label>
+      <label class="checkbox-row"><input type="checkbox" id="mode-blocks" checked> Blocos</label>
+      <label class="checkbox-row"><input type="checkbox" id="mode-openings" checked> Aberturas (Portas/Janelas)</label>
+      <label class="checkbox-row"><input type="checkbox" id="mode-axes"> Eixos</label>
+      <label class="checkbox-row"><input type="checkbox" id="mode-errors" checked> Paredes com erro</label>
+    </div>
+
+    <label>Camadas do DXF</label>
+    <div id="layer-toggles"><span class="hint">Carregue um DXF para listar as camadas.</span></div>
+
+    <div id="selection-panel"></div>
+
+    <div id="walls-list"></div>
+  </div>
+  <div id="viewport">
+    <div id="view-toolbar">
+      <button class="view-btn" id="view-top">Topo</button>
+      <button class="view-btn" id="view-front">Frente</button>
+      <button class="view-btn" id="view-side">Lateral</button>
+      <button class="view-btn" id="view-iso">Isométrica</button>
+      <button class="view-btn" id="view-extents">Zoom Extents</button>
+    </div>
+    <div id="legend">
+      <div><span style="background:#4caf50"></span>fecha em blocos</div>
+      <div><span style="background:#e53935"></span>não fecha / face única</div>
+      <div><span style="background:#5588cc"></span>planta DXF (referência)</div>
+    </div>
+    <div id="nav-hint">Esquerdo: selecionar · Scroll: zoom · Meio: pan · Shift+Meio: orbit</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const viewport = document.getElementById('viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b1d21);
+
+const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 1, 100000);
+camera.position.set(0, -800, 900);
+camera.up.set(0, 0, 1);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+viewport.appendChild(renderer.domElement);
+const canvasEl = renderer.domElement;
+canvasEl.addEventListener('contextmenu', e => e.preventDefault());
+
+const controls = new THREE.OrbitControls(camera, canvasEl);
+controls.target.set(0, 0, 0);
+
+// --- Navegação estilo Revit: esquerdo seleciona (não move a câmera),
+// scroll dá zoom (padrão do OrbitControls, já ativo), botão do meio faz
+// pan, Shift + botão do meio orbita. Registrado ANTES de criar o
+// OrbitControls (mesmo alvo, fase de bubble) para decidir a ação do botão
+// do meio a cada novo clique, antes do listener interno dele rodar. ---
+canvasEl.addEventListener('pointerdown', (e) => {
+  if (e.button === 1) {
+    controls.mouseButtons.MIDDLE = e.shiftKey ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+  }
+});
+controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: null };
+
+const grid = new THREE.GridHelper(2000, 40, 0x444444, 0x2a2a2a);
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(300, -500, 800);
+scene.add(dirLight);
+
+const wallGroup = new THREE.Group(); scene.add(wallGroup);
+const axesGroup = new THREE.Group(); axesGroup.visible = false; scene.add(axesGroup);
+const blocksGroup = new THREE.Group(); scene.add(blocksGroup);
+const openingsGroup = new THREE.Group(); scene.add(openingsGroup);
+const planGroup = new THREE.Group(); scene.add(planGroup);
+const planLayerGroups = {}; // nome do layer -> THREE.Group (filho de planGroup)
+
+const WALL_HEIGHT_CM = 280;
+
+let currentWalls = [];
+let currentEntities = [];
+let currentOpenings = [];
+let lastBounds = null;
+
+function clearGroup(group) {
+  while (group.children.length) {
+    const child = group.children.pop();
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+  }
+}
+
+function resetWalls() {
+  clearGroup(wallGroup);
+  clearGroup(axesGroup);
+  clearGroup(blocksGroup);
+  clearGroup(openingsGroup);
+}
+
+function resetPlan() {
+  clearGroup(planGroup);
+  Object.keys(planLayerGroups).forEach(k => delete planLayerGroups[k]);
+}
+
+function layerColor(name) {
+  // cor deterministica (hash simples do nome) - so' para diferenciar
+  // visualmente camadas na planta de referencia, sem nenhum significado
+  // semantico.
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return new THREE.Color(`hsl(${h % 360}, 55%, 55%)`);
+}
+
+function blockColor(blockLengthCm) {
+  if (blockLengthCm >= 39) return 0x63bd6f;
+  if (blockLengthCm >= 34) return 0x56a9c9;
+  if (blockLengthCm >= 19) return 0x8ac15c;
+  return 0xc6b85c;
+}
+
+function addBlockPreviewBoxes(wall, length, thickness, height, baseZ, angle, centerX, centerY) {
+  const blocks = wall.modulation && wall.modulation.blocks;
+  if (!blocks || !blocks.length) return;
+
+  const joint = 1;
+  const courseHeight = 19;
+  const courseJoint = 1;
+  const courseCount = Math.max(1, Math.floor((height + courseJoint) / (courseHeight + courseJoint)));
+  const boundary = wall.modulation.boundary_joints_cm || [0, 0];
+
+  for (let course = 0; course < courseCount; course++) {
+    const z0 = baseZ + course * (courseHeight + courseJoint);
+    if (z0 >= baseZ + height) break;
+    const h = Math.min(courseHeight, baseZ + height - z0);
+    let offset = -length / 2 + (boundary[0] || 0);
+    const row = course % 2 ? blocks.slice().reverse() : blocks;
+
+    row.forEach((blockLength, index) => {
+      if (offset >= length / 2) return;
+      const usableLength = Math.min(blockLength, length / 2 - offset);
+      if (usableLength <= 2) return;
+      const geom = new THREE.BoxGeometry(Math.max(2, usableLength - 0.6), Math.max(2, thickness - 0.6), h);
+      const mat = new THREE.MeshLambertMaterial({
+        color: blockColor(blockLength),
+        transparent: true,
+        opacity: 0.92,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.position.set(centerX, centerY, z0 + h / 2);
+      mesh.position.x += Math.cos(angle) * (offset + usableLength / 2);
+      mesh.position.y += Math.sin(angle) * (offset + usableLength / 2);
+      mesh.rotation.z = angle;
+      mesh.userData = { kind: 'block', wall, blockLength, course };
+      blocksGroup.add(mesh);
+
+      const edges = new THREE.EdgesGeometry(geom);
+      const edge = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x153018, opacity: 0.55, transparent: true }));
+      edge.position.copy(mesh.position);
+      edge.rotation.copy(mesh.rotation);
+      blocksGroup.add(edge);
+      offset += usableLength + (index < row.length - 1 ? joint : 0);
+    });
+  }
+}
+
+function addWallBox(wall) {
+  const [x0, y0] = wall.start;
+  const [x1, y1] = wall.end;
+  const dx = x1 - x0, dy = y1 - y0;
+  const length = Math.sqrt(dx * dx + dy * dy);
+  const angle = Math.atan2(dy, dx);
+  const thickness = wall.thickness_cm;
+  const height = wall.height_cm || WALL_HEIGHT_CM;
+  const baseZ = wall.base_z_cm || 0;
+  const closes = wall.modulation && wall.modulation.closes;
+  const isError = wall.single_line || !closes;
+  const blocks = wall.modulation && wall.modulation.blocks;
+
+  const geometry = new THREE.BoxGeometry(length, thickness, height);
+  const material = new THREE.MeshLambertMaterial({
+    color: wall.single_line ? 0xe53935 : (closes ? 0x4caf50 : 0xe53935),
+    transparent: true,
+    opacity: blocks ? 0.18 : 0.85,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  const centerX = (x0 + x1) / 2;
+  const centerY = (y0 + y1) / 2;
+  mesh.position.set(centerX, centerY, baseZ + height / 2);
+  mesh.rotation.z = angle;
+  mesh.userData = { kind: 'wall', wall, isError };
+  wallGroup.add(mesh);
+
+  const edges = new THREE.EdgesGeometry(geometry);
+  const edgeLine = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, opacity: 0.4, transparent: true }));
+  edgeLine.position.copy(mesh.position);
+  edgeLine.rotation.copy(mesh.rotation);
+  edgeLine.userData = { kind: 'wall-edge', isError };
+  wallGroup.add(edgeLine);
+
+  // eixo da parede (referência no plano do chão)
+  const axisGeom = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(x0, y0, 1), new THREE.Vector3(x1, y1, 1),
+  ]);
+  axesGroup.add(new THREE.Line(axisGeom, new THREE.LineBasicMaterial({ color: 0xffdd55 })));
+
+  // divisões de blocos (aproximado: soma cumulativa dos comprimentos de
+  // wall.modulation.blocks, sem contar juntas separadamente - referência
+  // visual, não um desenho de execução).
+  addBlockPreviewBoxes(wall, length, thickness, height, baseZ, angle, centerX, centerY);
+
+  if (blocks && blocks.length > 1) {
+    let offset = -length / 2;
+    const boundaryMat = new THREE.LineBasicMaterial({ color: 0x1a1a1a });
+    for (let i = 0; i < blocks.length - 1; i++) {
+      offset += blocks[i];
+      const pts = [
+        new THREE.Vector3(offset, -thickness / 2, 0),
+        new THREE.Vector3(offset, thickness / 2, 0),
+        new THREE.Vector3(offset, thickness / 2, height),
+        new THREE.Vector3(offset, -thickness / 2, height),
+        new THREE.Vector3(offset, -thickness / 2, 0),
+      ];
+      const boundaryLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), boundaryMat);
+      boundaryLine.position.set((x0 + x1) / 2, (y0 + y1) / 2, baseZ);
+      boundaryLine.rotation.z = angle;
+      blocksGroup.add(boundaryLine);
+    }
+  }
+}
+
+function addPlanEntity(entity) {
+  const [x0, y0] = entity.start;
+  const [x1, y1] = entity.end;
+  if (!planLayerGroups[entity.layer]) {
+    const g = new THREE.Group();
+    planGroup.add(g);
+    planLayerGroups[entity.layer] = g;
+  }
+  const geom = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(x0, y0, 0), new THREE.Vector3(x1, y1, 0),
+  ]);
+  const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: layerColor(entity.layer) }));
+  line.userData = { kind: 'entity', entity };
+  planLayerGroups[entity.layer].add(line);
+}
+
+function buildLayerToggles(entities) {
+  const layers = [...new Set(entities.map(e => e.layer))].sort();
+  const container = document.getElementById('layer-toggles');
+  if (!layers.length) {
+    container.innerHTML = '<span class="hint">Nenhuma camada encontrada.</span>';
+    return;
+  }
+  container.innerHTML = layers.map(l =>
+    `<label class="checkbox-row"><input type="checkbox" class="layer-toggle" data-layer="${l}" checked> ${l}</label>`
+  ).join('');
+  container.querySelectorAll('.layer-toggle').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const g = planLayerGroups[cb.dataset.layer];
+      if (g) g.visible = cb.checked;
+    });
+  });
+}
+
+function applyWallVisibility() {
+  const showOk = document.getElementById('mode-walls').checked;
+  const showErr = document.getElementById('mode-errors').checked;
+  wallGroup.children.forEach(c => { c.visible = c.userData.isError ? showErr : showOk; });
+}
+
+function frameCamera(walls, entities) {
+  const points = [];
+  (walls || []).forEach(w => { points.push(w.start, w.end); });
+  (entities || []).forEach(e => { points.push(e.start, e.end); });
+  if (!points.length) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  points.forEach(([x, y]) => {
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+  });
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const span = Math.max(maxX - minX, maxY - minY, 200);
+  const maxHeight = Math.max(...(walls || []).map(w => (w.base_z_cm || 0) + (w.height_cm || WALL_HEIGHT_CM)), WALL_HEIGHT_CM);
+  lastBounds = { cx, cy, cz: maxHeight / 2, span };
+  controls.target.set(cx, cy, maxHeight / 2);
+  camera.position.set(cx, cy - span * 1.2, span * 1.1);
+  camera.up.set(0, 0, 1);
+  controls.update();
+}
+
+function setView(kind) {
+  const b = lastBounds || { cx: 0, cy: 0, cz: WALL_HEIGHT_CM / 2, span: 500 };
+  controls.target.set(b.cx, b.cy, b.cz);
+  const span = b.span;
+  if (kind === 'top') {
+    // deslocamento minusculo em Y evita a direcao da camera ficar paralela
+    // a camera.up=(0,0,1) (caso degenerado exatamente de topo).
+    camera.position.set(b.cx, b.cy + span * 0.001, b.cz + span * 1.6);
+  } else if (kind === 'front') {
+    camera.position.set(b.cx, b.cy - span * 1.6, b.cz);
+  } else if (kind === 'side') {
+    camera.position.set(b.cx - span * 1.6, b.cy, b.cz);
+  } else if (kind === 'iso') {
+    camera.position.set(b.cx - span * 1.1, b.cy - span * 1.1, b.cz + span * 1.1);
+  }
+  camera.up.set(0, 0, 1);
+  camera.lookAt(controls.target);
+  controls.update();
+}
+
+function focusOnWallId(wallId) {
+  const wall = currentWalls.find(w => w.id === wallId);
+  if (!wall) return;
+  const mesh = wallGroup.children.find(c => c.userData.kind === 'wall' && c.userData.wall.id === wallId);
+  if (mesh) selectObject(mesh);
+  const [x0, y0] = wall.start, [x1, y1] = wall.end;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const span = Math.max(wall.length_cm, wall.thickness_cm * 4, 150);
+  controls.target.set(cx, cy, WALL_HEIGHT_CM / 2);
+  camera.position.set(cx, cy - span * 1.4, span + WALL_HEIGHT_CM / 2);
+  camera.up.set(0, 0, 1);
+  controls.update();
+}
+
+// --- Seleção por clique (esquerdo) ---
+const raycaster = new THREE.Raycaster();
+raycaster.params.Line.threshold = 3;
+const mouseNdc = new THREE.Vector2();
+let mouseDownPos = null;
+let selectedObject = null;
+let selectedOriginalColor = null;
+
+function clearSelectionHighlight() {
+  if (selectedObject && selectedObject.material && selectedObject.material.color && selectedOriginalColor) {
+    selectedObject.material.color.copy(selectedOriginalColor);
+  }
+  selectedObject = null;
+  selectedOriginalColor = null;
+}
+
+function selectObject(obj) {
+  clearSelectionHighlight();
+  selectedObject = obj;
+  if (obj.material && obj.material.color) {
+    selectedOriginalColor = obj.material.color.clone();
+    obj.material.color.set(0xffffff);
+  }
+  const panel = document.getElementById('selection-panel');
+  if (obj.userData.kind === 'wall') {
+    const w = obj.userData.wall;
+    const mod = w.modulation || {};
+    panel.innerHTML = `<div class="sel-title">Parede ${w.id}</div>`
+      + `<div class="sel-row">Layer: ${w.layer}</div>`
+      + `<div class="sel-row">Comprimento: ${w.length_cm.toFixed(1)}cm · Espessura: ${w.thickness_cm.toFixed(1)}cm</div>`
+      + `<div class="sel-row">Junções: ${(w.junctions || []).map(j => j || '-').join(' / ')}</div>`
+      + `<div class="sel-row">Modulação: ${mod.closes ? 'fecha' : 'não fecha'}`
+      + `${mod.blocks ? ' (' + mod.blocks.join('+') + 'cm)' : ''}</div>`;
+  } else if (obj.userData.kind === 'entity') {
+    const e = obj.userData.entity;
+    const dx = e.end[0] - e.start[0], dy = e.end[1] - e.start[1];
+    const len = Math.sqrt(dx * dx + dy * dy);
+    panel.innerHTML = `<div class="sel-title">Entidade do DXF</div>`
+      + `<div class="sel-row">Layer: ${e.layer}</div>`
+      + `<div class="sel-row">Tipo: ${e.entity_type}</div>`
+      + `<div class="sel-row">Comprimento: ${len.toFixed(1)}cm</div>`
+      + `<div class="sel-row">Origem DXF: (${e.start[0].toFixed(1)}, ${e.start[1].toFixed(1)}) → `
+      + `(${e.end[0].toFixed(1)}, ${e.end[1].toFixed(1)})</div>`
+      + `<div class="sel-row">Wall associada: ${e.wall_id || 'nenhuma (fora de uma layer de parede analisada, ou parede sem par)'}</div>`;
+  }
+}
+
+canvasEl.addEventListener('mousedown', (e) => { mouseDownPos = [e.clientX, e.clientY]; });
+canvasEl.addEventListener('click', (e) => {
+  if (mouseDownPos) {
+    const moved = Math.hypot(e.clientX - mouseDownPos[0], e.clientY - mouseDownPos[1]);
+    if (moved > 4) return; // foi um drag, nao um clique de selecao
+  }
+  const rect = canvasEl.getBoundingClientRect();
+  mouseNdc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  mouseNdc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouseNdc, camera);
+
+  const pickables = [];
+  if (wallGroup.visible) {
+    wallGroup.children.forEach(c => { if (c.userData.kind === 'wall' && c.visible) pickables.push(c); });
+  }
+  if (planGroup.visible) {
+    Object.values(planLayerGroups).forEach(g => { if (g.visible) g.children.forEach(c => pickables.push(c)); });
+  }
+  const hits = raycaster.intersectObjects(pickables, false);
+  if (hits.length) selectObject(hits[0].object);
+});
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = viewport.clientWidth / viewport.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+});
+
+function setStatus(text, isError) {
+  const el = document.getElementById('status');
+  el.textContent = text || '';
+  el.style.color = isError ? '#ff6b6b' : '#ffb454';
+}
+
+function parseLayers() {
+  const raw = document.getElementById('wall-layers').value.trim();
+  if (!raw) return null;
+  return raw.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+async function loadLayers() {
+  const path = document.getElementById('dxf-path').value.trim();
+  if (!path) { setStatus('Informe o caminho do arquivo DXF.', true); return; }
+  setStatus('Analisando layers (geometria + nome)...');
+  try {
+    const unitScaleRaw = document.getElementById('unit-scale').value;
+    const unit_scale_to_cm = unitScaleRaw ? parseFloat(unitScaleRaw) : null;
+    const res = await fetch('/api/analyze-layers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, expected_layers: parseLayers(), unit_scale_to_cm }),
+    });
+    const data = await res.json();
+    if (!res.ok) { setStatus(data.error || 'Erro ao analisar layers.', true); return; }
+
+    document.getElementById('layers-list').innerHTML = data.layers.map(l => {
+      const cls = l.status === 'OK' ? 'ok' : 'atencao';
+      const matchLine = l.matched_expected
+        ? `Correspondência: ${l.matched_expected} (nome ${Math.round(l.name_score * 100)}%)<br>`
+        : '';
+      return `<div class="layer-row ${cls}">`
+        + `<span class="layer-name">${l.layer}</span><br>`
+        + `<span class="layer-detail">${matchLine}`
+        + `Confiança geométrica: ${Math.round(l.geometry_score * 100)}% · `
+        + `Confiança total: ${Math.round(l.confidence * 100)}% · `
+        + `Entidades: ${l.entity_count}</span></div>`;
+    }).join('');
+
+    const lowConfidence = data.layers.filter(l => l.status !== 'OK');
+    setStatus(
+      lowConfidence.length
+        ? `${lowConfidence.length} layer(s) com confiança baixa - confira antes de usar (nunca escolha só pelo nome).`
+        : ''
+    );
+  } catch (err) {
+    setStatus('Falha ao conectar ao servidor: ' + err, true);
+  }
+}
+
+function renderOpenings(openings) {
+  clearGroup(openingsGroup);
+  (openings || []).forEach(op => {
+    const [cx, cy] = op.center_cm;
+    const w = op.width_cm || 80;
+    const thickness = op.wall_thickness_cm || 16;
+    const sill = op.sill_cm || 0;
+    const head = op.head_cm || 210;
+    const h = Math.max(head - sill, 20);
+    const cz = sill + h / 2;
+    const angle = op.angle_rad || 0;
+
+    const geom = new THREE.BoxGeometry(w, thickness, h);
+    const mat = new THREE.MeshLambertMaterial({
+      color: 0x00bcd4,
+      transparent: true,
+      opacity: 0.08,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(cx, cy, cz);
+    mesh.rotation.z = angle;
+    mesh.userData = { kind: 'opening', opening: op };
+    openingsGroup.add(mesh);
+
+    const edges = new THREE.EdgesGeometry(geom);
+    const edgeLine = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x00e5ff, opacity: 0.9, transparent: true }));
+    edgeLine.position.copy(mesh.position);
+    edgeLine.rotation.copy(mesh.rotation);
+    openingsGroup.add(edgeLine);
+  });
+  openingsGroup.visible = document.getElementById('mode-openings').checked;
+}
+
+function renderModulationData(data, options = {}) {
+  resetWalls();
+  currentWalls = data.walls || [];
+  currentOpenings = data.openings || currentOpenings || [];
+  currentWalls.forEach(addWallBox);
+  renderOpenings(currentOpenings);
+  applyWallVisibility();
+  blocksGroup.visible = document.getElementById('mode-blocks').checked;
+  axesGroup.visible = document.getElementById('mode-axes').checked;
+  document.getElementById('selection-panel').innerHTML = '';
+
+  if (data.entities && data.entities.length) {
+    currentEntities = data.entities;
+    resetPlan();
+    currentEntities.forEach(addPlanEntity);
+    buildLayerToggles(currentEntities);
+    planGroup.visible = document.getElementById('mode-plan').checked;
+  }
+
+  frameCamera(currentWalls, currentEntities);
+
+  const closesCount = currentWalls.filter(w => w.modulation && w.modulation.closes).length;
+  let summaryText = `${currentWalls.length} parede(s) — ${closesCount} fecham em blocos, ${currentWalls.length - closesCount} precisam de ajuste.`;
+  if (currentOpenings.length) summaryText += `\n${currentOpenings.length} abertura(s) capturada(s).`;
+  if (data.source) summaryText += `\nProjeto: ${data.source}`;
+  if (data.level) summaryText += ` · Nível: ${data.level}`;
+  if (data.source_mode === 'revit_walls') summaryText += `\nBase geométrica: Walls existentes do Revit.`;
+  if (options.adjustment && options.adjustment.actions) {
+    const adjusted = options.adjustment.actions.filter(a => a.status === 'adjusted').length;
+    summaryText += `\nAjuste automático: ${adjusted} parede(s) corrigida(s) no preview.`;
+  }
+  document.getElementById('summary').textContent = summaryText;
+
+  document.getElementById('walls-list').innerHTML = currentWalls.map(w => {
+    const mod = w.modulation || {};
+    const cls = mod.closes ? 'ok' : 'bad';
+    const blocks = mod.blocks ? mod.blocks.join('+') + 'cm' : `sugestão: ${mod.suggested_length_cm}cm`;
+    const origin = w.source === 'revit_wall' ? ' · Revit Wall' : '';
+    const openings = w.openings_count ? ` · ${w.openings_count} abertura(s)` : '';
+    return `<div class="wall-row ${cls}" data-wall-id="${w.id}">${w.id}${origin} · ${w.length_cm.toFixed(1)}cm · esp ${w.thickness_cm.toFixed(1)}cm${openings}`
+      + `${w.single_line ? ' · FACE ÚNICA' : ''}<br><span class="blocks">${blocks}</span></div>`;
+  }).join('');
+
+  const validation = data.validation || { issues: [] };
+  document.getElementById('validation-banner').textContent = validation.issues.length
+    ? validation.issues.join('\n')
+    : '';
+
+  const needsAdjustment = currentWalls.some(w => !(w.modulation && w.modulation.closes));
+  document.getElementById('btn-auto-adjust').disabled = !needsAdjustment;
+}
+
+async function loadModulation() {
+  const path = document.getElementById('dxf-path').value.trim();
+  if (!path) { setStatus('Informe o caminho do arquivo.', true); return; }
+  setStatus('Calculando modulação...');
+  document.getElementById('validation-banner').textContent = '';
+  try {
+    const unitScaleRaw = document.getElementById('unit-scale').value;
+    const unit_scale_to_cm = unitScaleRaw ? parseFloat(unitScaleRaw) : null;
+    const res = await fetch('/api/load', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, layers: parseLayers(), unit_scale_to_cm }),
+    });
+    const data = await res.json();
+    if (!res.ok) { setStatus(data.error || 'Erro ao processar o arquivo.', true); return; }
+
+    if (data.entities && data.entities.length) {
+      currentEntities = data.entities;
+    } else {
+      await loadPlanEntities(unit_scale_to_cm);
+    }
+    renderModulationData(data);
+
+    setStatus((data.warnings || []).join('\n'));
+  } catch (err) {
+    setStatus('Falha ao conectar ao servidor: ' + err, true);
+  }
+}
+
+async function loadPlanEntities(unit_scale_to_cm) {
+  const path = document.getElementById('dxf-path').value.trim();
+  if (!path) return;
+  try {
+    const res = await fetch('/api/entities', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, unit_scale_to_cm, layers: parseLayers() }),
+    });
+    const data = await res.json();
+    if (!res.ok) return;
+    currentEntities = data.entities;
+    resetPlan();
+    currentEntities.forEach(addPlanEntity);
+    buildLayerToggles(currentEntities);
+    planGroup.visible = document.getElementById('mode-plan').checked;
+  } catch (err) {
+    // planta baixa e' so' referencia visual - falha aqui nao trava o resto.
+    console.warn('Falha ao carregar planta baixa de referência:', err);
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function pickAndConvertDwg() {
+  const btn = document.getElementById('btn-pick-dwg');
+  btn.disabled = true;
+  try {
+    setStatus('Selecionando arquivo...');
+    const pickRes = await fetch('/api/pick-dwg', { method: 'POST' });
+    const pickData = await pickRes.json();
+    if (!pickRes.ok) { setStatus(pickData.error || 'Erro ao abrir o seletor de arquivos.', true); return; }
+    if (!pickData.path) { setStatus('Seleção cancelada.'); return; }
+
+    setStatus('DWG selecionado: ' + pickData.path);
+    await sleep(400);
+
+    setStatus('Convertendo com ODA...');
+    const convRes = await fetch('/api/convert-dwg', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: pickData.path }),
+    });
+    const convData = await convRes.json();
+    if (!convRes.ok) { setStatus(convData.error || 'Erro ao converter o DWG com o ODA.', true); return; }
+
+    setStatus('Conversão concluída');
+    document.getElementById('dxf-path').value = convData.dxf_path;
+    await sleep(400);
+
+    setStatus('DXF pronto para utilização');
+    await loadLayers();
+    await loadModulation();
+  } catch (err) {
+    setStatus('Falha ao conectar ao servidor: ' + err, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function pickJsonCapture() {
+  const btn = document.getElementById('btn-pick-json');
+  btn.disabled = true;
+  try {
+    setStatus('Selecionando arquivo JSON...');
+    const res = await fetch('/api/pick-json', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) { setStatus(data.error || 'Erro ao abrir seletor.', true); return; }
+    if (!data.path) { setStatus('Seleção cancelada.'); return; }
+    document.getElementById('dxf-path').value = data.path;
+    await loadModulation();
+  } catch (err) {
+    setStatus('Falha ao conectar: ' + err, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function autoAdjustWalls() {
+  if (!currentWalls.length) {
+    setStatus('Carregue a modulação antes de ajustar.', true);
+    return;
+  }
+  const btn = document.getElementById('btn-auto-adjust');
+  btn.disabled = true;
+  try {
+    setStatus('Ajustando paredes incompatíveis no preview...');
+    const res = await fetch('/api/auto-adjust', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ walls: currentWalls }),
+    });
+    const data = await res.json();
+    if (!res.ok) { setStatus(data.error || 'Erro ao ajustar paredes.', true); return; }
+    renderModulationData({
+      walls: data.walls,
+      openings: currentOpenings,
+      validation: data.validation,
+      source_mode: 'revit_walls',
+    }, { adjustment: data.adjustment });
+    const actions = (data.adjustment && data.adjustment.actions) || [];
+    const adjusted = actions.filter(a => a.status === 'adjusted');
+    const manual = actions.filter(a => a.status === 'manual');
+    setStatus(
+      `${adjusted.length} parede(s) ajustada(s) no preview.`
+      + (manual.length ? `\n${manual.length} parede(s) ainda exigem revisão manual.` : '')
+    );
+  } catch (err) {
+    setStatus('Falha ao conectar ao servidor: ' + err, true);
+  } finally {
+    btn.disabled = !currentWalls.some(w => !(w.modulation && w.modulation.closes));
+  }
+}
+
+document.getElementById('btn-pick-dwg').addEventListener('click', pickAndConvertDwg);
+document.getElementById('btn-pick-json').addEventListener('click', pickJsonCapture);
+document.getElementById('btn-layers').addEventListener('click', loadLayers);
+document.getElementById('btn-load').addEventListener('click', loadModulation);
+document.getElementById('btn-auto-adjust').addEventListener('click', autoAdjustWalls);
+
+document.getElementById('view-top').addEventListener('click', () => setView('top'));
+document.getElementById('view-front').addEventListener('click', () => setView('front'));
+document.getElementById('view-side').addEventListener('click', () => setView('side'));
+document.getElementById('view-iso').addEventListener('click', () => setView('iso'));
+document.getElementById('view-extents').addEventListener('click', () => frameCamera(currentWalls, currentEntities));
+
+document.getElementById('mode-plan').addEventListener('change', e => { planGroup.visible = e.target.checked; });
+document.getElementById('mode-walls').addEventListener('change', applyWallVisibility);
+document.getElementById('mode-errors').addEventListener('change', applyWallVisibility);
+document.getElementById('mode-blocks').addEventListener('change', e => { blocksGroup.visible = e.target.checked; });
+document.getElementById('mode-openings').addEventListener('change', e => { openingsGroup.visible = e.target.checked; });
+document.getElementById('mode-axes').addEventListener('change', e => { axesGroup.visible = e.target.checked; });
+
+document.getElementById('walls-list').addEventListener('click', (e) => {
+  const row = e.target.closest('.wall-row');
+  if (row) focusOnWallId(row.dataset.wallId);
+});
+
+// Auto-carrega captura ou arquivo se passado via query param ?capture=... ou ?file=...
+window.addEventListener('DOMContentLoaded', () => {
+  const params = new URLSearchParams(window.location.search);
+  const capture = params.get('capture') || params.get('file');
+  if (capture) {
+    document.getElementById('dxf-path').value = decodeURIComponent(capture);
+    loadModulation();
+  }
+});
+</script>
+</body>
+</html>
