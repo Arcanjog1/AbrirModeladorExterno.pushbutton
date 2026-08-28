@@ -5928,6 +5928,342 @@ def plan_pier_opening_nudges(wall_idx, walls_to_create, openings_per_wall, catal
     }
 
 
+OPENING_WIDTH_PARAM_NAME = "Largura_abertura"
+
+# Menor comprimento (cm) que um pilarete pode ter e ainda ser um pilarete.
+# Abaixo disso, "fechar o trecho" alargando a abertura equivale a apagar a
+# parede naquele ponto - o planejador desiste em vez de propor. Vale a menor
+# peca do catalogo (pastilha, 4cm) mais folga de junta.
+PIER_MIN_USEFUL_CM = 5.0
+
+
+def plan_pier_opening_widenings(wall_idx, walls_to_create, openings_per_wall, catalog,
+                                nodes, end_to_node,
+                                max_widen_cm=OPENING_WIDTH_INCREASE_MAX_CM):
+    """Variante de `plan_pier_opening_nudges` que resolve o pilarete
+    ALARGANDO a abertura vizinha em vez de deslocá-la (regra 18.2,
+    preferencia declarada pelo usuario em 2026-08-28: "pode alterar a
+    dimensao das aberturas, de preferencia aumentando elas").
+
+    Por que alargar e' melhor que mover, neste modelo: medido ao vivo, a
+    familia `Abertura de janela para paredes de blocos` cresce POR UM LADO
+    SO' (largura +2cm -> centro anda 1cm), entao a borda OPOSTA fica parada.
+    Deslocar a abertura movia as DUAS bordas, e como ha' paredes "gemeas"
+    que compartilham a mesma abertura, o empurrao que consertava um eixo
+    quebrava o vizinho (medido: eixo 4 pedia -1cm no mesmo trecho em que o
+    eixo 6 pedia +1cm - impossivel satisfazer os dois movendo). Alargando,
+    so' o trecho daquele lado encolhe.
+
+    Como o alargamento so' ENCOLHE o trecho, o alvo e' sempre o modulo
+    valido INFERIOR mais proximo - o que tambem casa com a preferencia do
+    usuario por aumentar o vao, nunca reduzir.
+
+    Devolve `{"wall_idx", "widenings": [...], "reason"}` ou None. Cada item
+    e' `{"seg_start_cm", "seg_end_cm", "atual_cm", "alvo_cm", "widen_cm",
+    "lado"}`. Nunca aplica nada e nunca levanta excecao."""
+    try:
+        aberturas = openings_for_wall(openings_per_wall, wall_idx)
+        if not aberturas:
+            return None
+        node_by_end = _index_node_candidates_by_wall_end(
+            nodes, [], walls_to_create, end_to_node) if nodes is not None else {}
+        fill = solve_wall_free_fill(
+            wall_idx, walls_to_create, nodes, end_to_node, openings_per_wall,
+            node_by_end, {}, catalog,
+        )
+    except Exception:
+        return None
+
+    nao_fecham = fill.get("non_modular") or []
+    if not nao_fecham:
+        return None
+
+    bordas = []
+    for op in aberturas:
+        bordas.append(op[0] / FEET_PER_METER * 100.0)
+        bordas.append(op[1] / FEET_PER_METER * 100.0)
+
+    tol = OPENING_ALIGNED_TOUCH_TOLERANCE_CM
+    vistos, itens = set(), []
+    for entry in nao_fecham:
+        ini, fim = _pier_bounds_from_non_modular(entry)
+        if ini is None or fim is None:
+            continue
+        chave = (round(ini, 1), round(fim, 1))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+
+        atual = entry.get("current_length_cm")
+        lower = entry.get("lower_valid_cm")
+        if atual is None or lower is None:
+            continue
+        widen = atual - lower          # sempre >= 0: alargar encolhe o trecho
+        if widen <= 1e-6 or widen > max_widen_cm + 1e-6:
+            continue
+        # NUNCA propor um alvo que ZERA (ou quase) o pilarete: alargar a
+        # abertura ate' o trecho sumir nao e' "modular", e' apagar a parede
+        # naquele ponto. Medido 2026-08-28: um eixo chegou a propor
+        # "4cm -> 0cm". O menor pilarete que ainda faz sentido e' o de uma
+        # peca do catalogo (a pastilha, 4cm) mais as juntas de contorno.
+        if lower < PIER_MIN_USEFUL_CM:
+            continue
+
+        ini_ab = any(abs(ini - b) <= tol for b in bordas)
+        fim_ab = any(abs(fim - b) <= tol for b in bordas)
+        if fim_ab:
+            lado = "fim"
+        elif ini_ab:
+            lado = "inicio"
+        else:
+            continue
+        itens.append({
+            "seg_start_cm": ini, "seg_end_cm": fim, "atual_cm": atual,
+            "alvo_cm": lower, "widen_cm": widen, "lado": lado,
+        })
+
+    if not itens:
+        return None
+    return {
+        "wall_idx": wall_idx, "widenings": itens,
+        "reason": "{} pilarete(s) fecham alargando a abertura vizinha em ate {:.1f}cm".format(
+            len(itens), max(i["widen_cm"] for i in itens)),
+    }
+
+
+def apply_pier_opening_widenings(target_doc, plano, walls_to_create, all_openings,
+                                 ja_alargadas=None):
+    """Aplica um plano de `plan_pier_opening_widenings`: aumenta o parametro
+    de INSTANCIA `Largura_abertura` da abertura vizinha ao pilarete. Precisa
+    rodar dentro de uma Transacao ja' aberta pelo chamador; usa um
+    SubTransaction por abertura.
+
+    `ja_alargadas`: set compartilhado de `element_id`, para que a MESMA
+    abertura nunca seja alargada duas vezes quando eixos gemeos propoem o
+    mesmo ajuste (mesma protecao de `apply_pier_opening_nudges`).
+
+    Mantem a rede de seguranca do `MoveElement`: `Regenerate()` + checagem
+    de `IsValidObject`, com RollBack do SubTransaction se a instancia sumir
+    (ver o bug de 2026-08-24 em que 8 aberturas desapareceram em silencio).
+
+    Devolve `(aplicados, falhas)`."""
+    aplicados, falhas = [], []
+    if not plano or not plano.get("widenings"):
+        return aplicados, falhas
+    if ja_alargadas is None:
+        ja_alargadas = set()
+
+    wall_idx = plano["wall_idx"]
+    try:
+        centerline = walls_to_create[wall_idx][0]
+        p0 = centerline.GetEndPoint(0)
+        dir_xy = (centerline.GetEndPoint(1) - p0).Normalize()
+    except Exception as ex:
+        return aplicados, ["eixo {}: geometria invalida ({})".format(wall_idx, ex)]
+
+    def _t_cm(ponto):
+        return ((ponto - p0).DotProduct(dir_xy)) / FEET_PER_METER * 100.0
+
+    bordas = []
+    for o in (all_openings or []):
+        c, w = o.get("center_xy"), o.get("width_ft")
+        if c is None or not w:
+            continue
+        tc = _t_cm(c)
+        meia = w / 2.0 / FEET_PER_METER * 100.0
+        bordas.append((o, tc - meia, tc + meia))
+
+    tol = OPENING_ALIGNED_TOUCH_TOLERANCE_CM
+    for item in plano["widenings"]:
+        alvo_t = item["seg_end_cm"] if item["lado"] == "fim" else item["seg_start_cm"]
+        escolhida = None
+        for o, t_lo, t_hi in bordas:
+            if item["lado"] == "fim" and abs(t_lo - alvo_t) <= tol:
+                escolhida = o
+                break
+            if item["lado"] == "inicio" and abs(t_hi - alvo_t) <= tol:
+                escolhida = o
+                break
+        if escolhida is None:
+            falhas.append("eixo {}: nenhuma abertura encosta em t={:.1f}cm".format(
+                wall_idx, alvo_t))
+            continue
+
+        eid = escolhida.get("element_id")
+        if eid in ja_alargadas:
+            falhas.append(
+                "eixo {}: abertura {} ja' foi alargada por outro eixo - ignorado".format(
+                    wall_idx, eid))
+            continue
+        inst = target_doc.GetElement(escolhida["element_id_obj"])
+        if inst is None:
+            falhas.append("eixo {}: abertura {} nao existe mais".format(wall_idx, eid))
+            continue
+        par = inst.LookupParameter(OPENING_WIDTH_PARAM_NAME)
+        if par is None or par.IsReadOnly:
+            falhas.append("eixo {}: abertura {} sem parametro '{}' editavel".format(
+                wall_idx, eid, OPENING_WIDTH_PARAM_NAME))
+            continue
+
+        largura_antes = par.AsDouble()
+        nova = largura_antes + item["widen_cm"] * FEET_PER_METER / 100.0
+        st = SubTransaction(target_doc)
+        st.Start()
+        try:
+            par.Set(nova)
+            target_doc.Regenerate()
+            if not inst.IsValidObject:
+                st.RollBack()
+                falhas.append(
+                    "eixo {}: abertura {} deixou de existir ao alargar {:.1f}cm - "
+                    "desfeito, nada perdido.".format(wall_idx, eid, item["widen_cm"]))
+                continue
+            st.Commit()
+            ja_alargadas.add(eid)
+            aplicados.append({
+                "element_id": eid, "widen_cm": item["widen_cm"],
+                "largura_antes_cm": largura_antes / FEET_PER_METER * 100.0,
+                "largura_depois_cm": nova / FEET_PER_METER * 100.0,
+                "seg_start_cm": item["seg_start_cm"], "seg_end_cm": item["seg_end_cm"],
+            })
+        except Exception as ex:
+            try:
+                st.RollBack()
+            except Exception:
+                pass
+            falhas.append("eixo {}: falha ao alargar abertura {} ({})".format(
+                wall_idx, eid, ex))
+
+    return aplicados, falhas
+
+
+def apply_pier_opening_nudges(target_doc, plano, walls_to_create, all_openings,
+                              openings_per_wall, ja_movidas=None):
+    """Aplica DE VERDADE, no modelo, um plano de `plan_pier_opening_nudges`
+    (regra 18.2). Precisa rodar dentro de uma Transacao ja' aberta pelo
+    chamador - abre um SubTransaction POR ABERTURA, para que a falha de uma
+    nunca derrube as outras.
+
+    Devolve `(aplicados, falhas)`: `aplicados` e' a lista de
+    `{"element_id", "delta_cm", "seg_start_cm", "seg_end_cm"}` que foram
+    commitados de verdade; `falhas` sao strings com o motivo de cada uma que
+    nao foi.
+
+    REDE DE SEGURANCA obrigatoria (bug real de 2026-08-24, reportado com
+    screenshots): `ElementTransformUtils.MoveElement` pode fazer o Revit
+    invalidar/apagar a instancia da abertura SILENCIOSAMENTE no
+    `Regenerate()` seguinte - naquela ocasiao 8 das 77 aberturas sumiram do
+    modelo sem nenhuma excecao e sem warning. Por isso, depois de cada
+    movimento: `Regenerate()` + checar `IsValidObject` e, se a instancia
+    sumiu, `RollBack()` daquele SubTransaction e reportar como falha. Nunca
+    commitar um movimento sem essa checagem.
+
+    `ja_movidas`: SET compartilhado de `element_id` que o chamador passa
+    entre chamadas para garantir que cada abertura ande NO MAXIMO UMA VEZ.
+    Obrigatorio quando se percorre varios eixos (bug real medido ao vivo
+    2026-08-28: eixos "gemeos" - paredes distintas que compartilham a mesma
+    abertura - propunham cada um o mesmo empurrao de 1cm, e a abertura
+    andava 2cm no total, o dobro do planejado). Sem o set, cada chamada
+    isolada continua funcionando como antes.
+
+    NAO escreve em `openings_per_wall`/`walls_to_create` - o chamador
+    atualiza a geometria em memoria (ou recarrega do documento) so' DEPOIS
+    de a Transacao externa ter sido commitada."""
+    aplicados, falhas = [], []
+    if not plano or not plano.get("nudges"):
+        return aplicados, falhas
+    if ja_movidas is None:
+        ja_movidas = set()
+
+    wall_idx = plano["wall_idx"]
+    try:
+        centerline = walls_to_create[wall_idx][0]
+        p0 = centerline.GetEndPoint(0)
+        p1 = centerline.GetEndPoint(1)
+        dir_xy = (p1 - p0).Normalize()
+    except Exception as ex:
+        return aplicados, ["eixo {}: geometria invalida ({})".format(wall_idx, ex)]
+
+    por_id = dict((o.get("element_id"), o) for o in (all_openings or []))
+    tol = OPENING_ALIGNED_TOUCH_TOLERANCE_CM
+
+    def _t_cm(ponto):
+        return ((ponto - p0).DotProduct(dir_xy)) / FEET_PER_METER * 100.0
+
+    # bordas (t_lo, t_hi) de cada abertura DESTE eixo
+    bordas = []
+    for o in (all_openings or []):
+        c = o.get("center_xy")
+        w = o.get("width_ft")
+        if c is None or not w:
+            continue
+        tc = _t_cm(c)
+        meia = w / 2.0 / FEET_PER_METER * 100.0
+        bordas.append((o.get("element_id"), tc - meia, tc + meia))
+
+    for n in plano["nudges"]:
+        delta_cm = n["delta_cm"]
+        alvo_t = n["seg_end_cm"] if n["lado"] == "fim" else n["seg_start_cm"]
+        # a borda da abertura que faz fronteira com este trecho
+        escolhida = None
+        for eid, t_lo, t_hi in bordas:
+            if n["lado"] == "fim" and abs(t_lo - alvo_t) <= tol:
+                escolhida = (eid, +1.0)      # empurrar t_lo para frente aumenta o trecho
+                break
+            if n["lado"] == "inicio" and abs(t_hi - alvo_t) <= tol:
+                escolhida = (eid, -1.0)      # puxar t_hi para tras aumenta o trecho
+                break
+        if escolhida is None:
+            falhas.append(
+                "eixo {}: nenhuma abertura encosta em t={:.1f}cm - nada movido".format(
+                    wall_idx, alvo_t))
+            continue
+
+        eid, sentido = escolhida
+        if eid in ja_movidas:
+            # Ver `ja_movidas` no docstring: eixos gemeos compartilham a
+            # MESMA abertura e propoem o mesmo empurrao cada um - mover duas
+            # vezes dobraria o deslocamento planejado.
+            falhas.append(
+                "eixo {}: abertura {} ja' foi deslocada por outro eixo - "
+                "movimento ignorado para nao dobrar o ajuste.".format(wall_idx, eid))
+            continue
+        inst = target_doc.GetElement(por_id[eid]["element_id_obj"]) if eid in por_id else None
+        if inst is None:
+            falhas.append("eixo {}: abertura {} nao existe mais no modelo".format(wall_idx, eid))
+            continue
+
+        desloc_ft = sentido * delta_cm * FEET_PER_METER / 100.0
+        vetor = XYZ(dir_xy.X * desloc_ft, dir_xy.Y * desloc_ft, 0.0)
+
+        st = SubTransaction(target_doc)
+        st.Start()
+        try:
+            ElementTransformUtils.MoveElement(target_doc, inst.Id, vetor)
+            target_doc.Regenerate()
+            if not inst.IsValidObject:
+                st.RollBack()
+                falhas.append(
+                    "eixo {}: abertura {} deixou de existir apos mover {:+.1f}cm - "
+                    "alteracao desfeita, nada perdido. Requer ajuste manual.".format(
+                        wall_idx, eid, sentido * delta_cm))
+                continue
+            st.Commit()
+            ja_movidas.add(eid)
+            aplicados.append({
+                "element_id": eid, "delta_cm": sentido * delta_cm,
+                "seg_start_cm": n["seg_start_cm"], "seg_end_cm": n["seg_end_cm"],
+            })
+        except Exception as ex:
+            try:
+                st.RollBack()
+            except Exception:
+                pass
+            falhas.append("eixo {}: falha ao mover abertura {} ({})".format(wall_idx, eid, ex))
+
+    return aplicados, falhas
+
+
 def plan_axis_opening_fix(target_doc, wall_idx, walls_to_create, openings_per_wall,
                            created_walls_by_axis, all_openings, wall_end_to_node=None,
                            wall_graph_nodes=None, verify=None, wall_segment_geometry=None,

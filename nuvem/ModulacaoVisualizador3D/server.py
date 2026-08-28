@@ -138,6 +138,11 @@ def _append_block_warnings(warnings, block_diagnostics):
         )
     if block_diagnostics.get("blocks_below_reference_count"):
         warnings.append("Ha blocos abaixo da cota de referencia da planta.")
+    if block_diagnostics.get("error_candidate_count"):
+        warnings.append(
+            "{} bloco(s) de parede reprovada foram mantidos em vermelho para revisao."
+            .format(block_diagnostics["error_candidate_count"])
+        )
 
 
 def _capture_view_payload(capture, candidates=None, block_diagnostics=None):

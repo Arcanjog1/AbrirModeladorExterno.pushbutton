@@ -456,6 +456,36 @@ def _merge_wall_status(statuses, candidate):
         statuses[candidate["wall_id"]] = candidate
 
 
+def _mark_candidates_for_failed_walls(candidates, statuses):
+    """Mantém blocos reprovados visíveis, mas inequívocos no visualizador.
+
+    Uma Wall sem solução não pode desaparecer silenciosamente. Os candidatos
+    que pertencem a uma Wall reprovada continuam no payload para diagnóstico,
+    recebem a cor vermelha e carregam o motivo; o renderer não precisa conhecer
+    regras de modulação para decidir o que é inválido.
+    """
+    failed_by_source = {}
+    for status in statuses.values():
+        if status.get("ok"):
+            continue
+        for source_id in status.get("source_wall_ids") or [status.get("wall_id")]:
+            if source_id is not None:
+                failed_by_source[str(source_id)] = status
+    for candidate in candidates:
+        candidate_ids = set(str(value) for value in (candidate.get("source_wall_ids") or []) if value is not None)
+        candidate_ids.update(str(value) for value in (candidate.get("secondary_source_wall_ids") or []) if value is not None)
+        if candidate.get("wall_id") is not None:
+            candidate_ids.add(str(candidate.get("wall_id")))
+        status = next((failed_by_source[value] for value in candidate_ids if value in failed_by_source), None)
+        if status is None:
+            continue
+        candidate["is_error"] = True
+        candidate["error_code"] = status.get("code")
+        candidate["error_reason"] = status.get("reason")
+        candidate["color_rgb"] = [229, 57, 53]
+    return sum(1 for candidate in candidates if candidate.get("is_error"))
+
+
 def solve_capture_block_candidates(capture, group_keys=None):
     """Resolve fiadas físicas por nível/faixa e serializa a geometria real.
 
@@ -571,6 +601,10 @@ def solve_capture_block_candidates(capture, group_keys=None):
                         _raw_wall_ids(raw_by_tuple[wall_idx])
                         if isinstance(wall_idx, int) and wall_idx < len(raw_by_tuple) else []
                     )
+                    secondary_source_wall_ids = (
+                        _raw_wall_ids(raw_by_tuple[secondary_idx])
+                        if isinstance(secondary_idx, int) and secondary_idx < len(raw_by_tuple) else []
+                    )
                     candidate_id = "{}:{}:{}:{}".format(group_key[0], wall_id or "node", course_index, len(result))
                     result.append({
                         "id": candidate_id,
@@ -582,6 +616,7 @@ def solve_capture_block_candidates(capture, group_keys=None):
                         "wall_id": wall_id,
                         "source_wall_ids": source_wall_ids,
                         "secondary_wall_idx": secondary_idx,
+                        "secondary_source_wall_ids": secondary_source_wall_ids,
                         "origin_cm": [origin.X * FT_TO_CM, origin.Y * FT_TO_CM],
                         "z_cm": z_cm - z_reference_cm,
                         "level": group_key[0],
@@ -597,6 +632,7 @@ def solve_capture_block_candidates(capture, group_keys=None):
                     })
         level_runs.append({"level": group_key[0], "base_z_cm": base_z_cm, "bands": len(bands), "courses": num_courses})
 
+    error_candidate_count = _mark_candidates_for_failed_walls(result, wall_statuses)
     compensator_codes = set(
         code for code, entry in catalog.items() if entry.get("is_compensator")
     )
@@ -644,6 +680,7 @@ def solve_capture_block_candidates(capture, group_keys=None):
         "invalid_b34_count": invalid_b34_count,
         "compensator_count": sum(1 for c in result if c.get("logical_code") in compensator_codes),
         "pastilha_count": sum(1 for c in result if c.get("logical_code") == "C04"),
+        "error_candidate_count": error_candidate_count,
         "main_block_count": sum(1 for c in result if c.get("logical_code") == "B39"),
         "blocks_below_reference_count": sum(1 for c in result if c.get("z_cm", 0.0) < -1e-6),
         "lintel_missing_count": lintel_missing_count,

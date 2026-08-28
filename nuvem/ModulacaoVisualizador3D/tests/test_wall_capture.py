@@ -9,11 +9,57 @@ from wall_capture import (
     walls_from_capture, enrich_openings_for_view, adjust_capture_opening,
     adjust_capture_openings,
     solve_capture_block_candidates, edit_capture_wall, move_capture_opening,
-    resize_capture_opening,
+    resize_capture_opening, _mark_candidates_for_failed_walls,
+)
+
+# Carrega os "stubs" usados pelo motor canônico fora do Revit.  O teste
+# abaixo protege a regra de fechamento na borda de abertura que também é
+# usada pelo visualizador externo.
+import engine_bridge  # noqa: F401
+from core.engine.wall_stepper import (
+    _pier_ordered_layout, BLOCK_JOINT_CM,
 )
 
 
 class TestWallsFromCapture(unittest.TestCase):
+    def test_fechamento_contra_abertura_tenta_a_junta_alternativa(self):
+        catalog = {
+            "B19": {"length_cm": 19, "is_compensator": False},
+            "B34": {"length_cm": 34, "is_compensator": False},
+            "B39": {"length_cm": 39, "is_compensator": False},
+            "C04": {"length_cm": 4, "is_compensator": True},
+            "C09": {"length_cm": 9, "is_compensator": True},
+        }
+
+        expected = {
+            5: ["C04"], 10: ["C09"], 25: ["B19", "C04"],
+            55: ["B19", "B34"], 85: ["B39", "B39", "C04"],
+        }
+        for pier_cm, codes in expected.items():
+            layout = _pier_ordered_layout(
+                pier_cm, catalog, BLOCK_JOINT_CM, BLOCK_JOINT_CM,
+                leading_open_override=True,
+            )
+            self.assertEqual([code for code, _start, _end in layout], codes)
+
+    def test_blocos_de_parede_reprovada_ficam_vermelhos_e_com_motivo(self):
+        candidates = [
+            {"wall_id": "101", "source_wall_ids": ["101"], "color_rgb": [10, 20, 30]},
+            {"wall_id": "102", "source_wall_ids": ["102"], "color_rgb": [10, 20, 30]},
+        ]
+        statuses = {
+            "101": {"wall_id": "101", "source_wall_ids": ["101"], "ok": False,
+                    "code": "NON_MODULAR", "reason": "trecho sem solução"},
+            "102": {"wall_id": "102", "source_wall_ids": ["102"], "ok": True},
+        }
+
+        marked = _mark_candidates_for_failed_walls(candidates, statuses)
+
+        self.assertEqual(marked, 1)
+        self.assertEqual(candidates[0]["color_rgb"], [229, 57, 53])
+        self.assertEqual(candidates[0]["error_reason"], "trecho sem solução")
+        self.assertNotIn("is_error", candidates[1])
+
     def test_edita_eixo_continuo_e_move_abertura_hospedada_junto(self):
         capture = {
             "walls": [

@@ -2672,7 +2672,8 @@ def _pier_remaining_snapped_cm(pier_cm, leading_joint_cm, trailing_joint_cm):
 
 def _pier_ordered_layout(pier_cm, catalog, leading_joint_cm, trailing_joint_cm,
                          first_code=None, allow_compensators=BLOCK_COMPENSATORS_ENABLED_BY_DEFAULT,
-                         leading_open_override=None, trailing_open_override=None):
+                         leading_open_override=None, trailing_open_override=None,
+                         _allow_opening_joint_fallback=True):
     """Lista ORDENADA [(codigo, start_cm, end_cm), ...], do inicio ao fim
     do trecho, que preenche `pier_cm` INTEIRO (incluindo as juntas de
     contorno): `leading_joint_cm`/`trailing_joint_cm` sao BLOCK_JOINT_CM
@@ -2756,6 +2757,45 @@ def _pier_ordered_layout(pier_cm, catalog, leading_joint_cm, trailing_joint_cm,
     isso como NON_MODULAR_WALL, nunca em silencio."""
     remaining = _pier_remaining_snapped_cm(pier_cm, leading_joint_cm, trailing_joint_cm)
     if remaining is None:
+        # FECHAMENTO CONTRA VAO (regra do usuario, 2026-08-28): "nesses
+        # casos voce pode colocar bloco de 34 ate' o final e uma pastilha ou
+        # um compensador dependendo da fiada". Um trecho que encosta numa
+        # ABERTURA e nao fecha com a junta de contorno padrao daquele lado
+        # pode fechar com a OUTRA junta - encostando a peca direto no vao
+        # (0cm) ou deixando a junta de assentamento normal (1cm). Medido ao
+        # vivo em 2026-08-28: trechos de 5cm, 25cm, 55cm, 75cm e 85cm
+        # ficavam sem NENHUMA peca (vazios visiveis no Revit, fotografados
+        # pelo usuario) so' por causa dessa rigidez - todos fecham com a
+        # junta alternada (5cm -> C04; 25cm -> B19+C04; 85cm -> B39+B39+C04).
+        #
+        # So' vale onde ha' ABERTURA: contra um no' de amarracao a junta e'
+        # estrutural e nao pode ser negociada. `_allow_opening_joint_fallback`
+        # corta a recursao no segundo nivel.
+        if not _allow_opening_joint_fallback:
+            return None
+        abre_ini = (leading_open_override if leading_open_override is not None
+                    else leading_joint_cm <= BLOCK_OPENING_JOINT_CM + 1e-6)
+        abre_fim = (trailing_open_override if trailing_open_override is not None
+                    else trailing_joint_cm <= BLOCK_OPENING_JOINT_CM + 1e-6)
+        alternativas = []
+        outro = lambda j: (BLOCK_JOINT_CM if j <= BLOCK_OPENING_JOINT_CM + 1e-6
+                           else BLOCK_OPENING_JOINT_CM)
+        if abre_ini:
+            alternativas.append((outro(leading_joint_cm), trailing_joint_cm))
+        if abre_fim:
+            alternativas.append((leading_joint_cm, outro(trailing_joint_cm)))
+        if abre_ini and abre_fim:
+            alternativas.append((outro(leading_joint_cm), outro(trailing_joint_cm)))
+        for alt_lead, alt_trail in alternativas:
+            alt = _pier_ordered_layout(
+                pier_cm, catalog, alt_lead, alt_trail, first_code=first_code,
+                allow_compensators=allow_compensators,
+                leading_open_override=leading_open_override,
+                trailing_open_override=trailing_open_override,
+                _allow_opening_joint_fallback=False,
+            )
+            if alt is not None:
+                return alt
         return None
     if remaining <= PIER_LAYOUT_TOLERANCE_CM:
         return []
