@@ -221,6 +221,114 @@ def test_varredura_sugere_a_espessura_desenhada():
     assert counts.get(14.0) == 1, counts
 
 
+@case
+def test_paredes_colineares_conectadas_viram_um_unico_eixo_logico():
+    walls = [
+        (seg(0, 0, 100, 0), ft(14), (False, False)),
+        (seg(100, 0, 240, 0), ft(14), (False, False)),
+    ]
+
+    merged, source_groups = m.merge_connected_collinear_walls(walls)
+
+    assert source_groups == [[0, 1]], source_groups
+    assert len(merged) == 1
+    assert abs(to_cm(merged[0][0].Length) - 240.0) < 0.01
+
+
+@case
+def test_bloco_pode_atravessar_divisa_entre_paredes_colineares():
+    walls = [
+        (seg(0, 0, 50, 0), ft(14), (False, False)),
+        (seg(50, 0, 119, 0), ft(14), (False, False)),
+    ]
+    merged, _source_groups = m.merge_connected_collinear_walls(walls)
+    merged, junction_map = m.extend_wall_ends_to_junctions(
+        merged, m.JUNCTION_FACE_SEARCH_FT
+    )
+    nodes, end_to_node = m.build_wall_graph(merged, junction_map)
+
+    result = m.solve_building_blocks(nodes, merged, end_to_node, [[]], CATALOG)
+
+    crossing = []
+    for candidate in result["candidates"]:
+        center_cm = to_cm(candidate["origin_world"].X)
+        half_length_cm = candidate["length_cm"] / 2.0
+        if center_cm - half_length_cm < 50.0 < center_cm + half_length_cm:
+            crossing.append(candidate)
+    assert crossing, result["candidates"]
+    assert not result["non_modular"], result["non_modular"]
+
+
+@case
+def test_prechecagem_de_walls_existentes_avalia_o_eixo_continuo():
+    walls = [
+        (seg(0, 0, 50, 0), ft(14), (False, False)),
+        (seg(50, 0, 119, 0), ft(14), (False, False)),
+    ]
+    merged, groups = m.merge_connected_collinear_walls(walls)
+    mapping = {0: [(101, "cad"), (102, "cad")]}
+
+    results = m.evaluate_wall_axes_modulation(merged, mapping)
+
+    assert groups == [[0, 1]]
+    assert len(results) == 1
+    assert results[0]["compatible"]
+    assert abs(results[0]["length_cm"] - 119.0) < 0.01
+    assert results[0]["wall_ids"] == [101, 102]
+
+
+@case
+def test_paredes_colineares_separadas_nao_sao_unidas():
+    walls = [
+        (seg(0, 0, 100, 0), ft(14), (False, False)),
+        (seg(102, 0, 240, 0), ft(14), (False, False)),
+    ]
+
+    merged, source_groups = m.merge_connected_collinear_walls(walls)
+
+    assert len(merged) == 2
+    assert source_groups == [[0], [1]], source_groups
+
+
+@case
+def test_consolidacao_colinear_preserva_encontro_t_como_amarracao():
+    walls = [
+        (seg(0, 0, 200, 0), ft(14), (False, False)),
+        (seg(200, 0, 400, 0), ft(14), (False, False)),
+        (seg(200, 0, 200, 300), ft(14), (False, False)),
+    ]
+
+    merged, source_groups = m.merge_connected_collinear_walls(walls)
+    merged, junction_map = m.extend_wall_ends_to_junctions(
+        merged, m.JUNCTION_FACE_SEARCH_FT
+    )
+    nodes, _end_to_node = m.build_wall_graph(merged, junction_map)
+
+    assert len(merged) == 2, source_groups
+    tees = [node for node in nodes if node["kind"] == "T_INTERSECTION"]
+    assert len(tees) == 1, [node["kind"] for node in nodes]
+
+
+@case
+def test_consolidacao_colinear_preserva_cruzamento_como_amarracao_x():
+    walls = [
+        (seg(-200, 0, 0, 0), ft(14), (False, False)),
+        (seg(0, 0, 200, 0), ft(14), (False, False)),
+        (seg(0, -200, 0, 0), ft(14), (False, False)),
+        (seg(0, 0, 0, 200), ft(14), (False, False)),
+    ]
+
+    merged, source_groups = m.merge_connected_collinear_walls(walls)
+    merged, junction_map = m.extend_wall_ends_to_junctions(
+        merged, m.JUNCTION_FACE_SEARCH_FT
+    )
+    nodes, _end_to_node = m.build_wall_graph(merged, junction_map)
+
+    assert len(merged) == 2, source_groups
+    crossings = [node for node in nodes if node["kind"] == "X_INTERSECTION"]
+    assert len(crossings) == 1, [node["kind"] for node in nodes]
+
+
 # ------------------------------------------ grafo de encontros (Etapa 2)
 @case
 def test_canto_L_e_um_unico_no():

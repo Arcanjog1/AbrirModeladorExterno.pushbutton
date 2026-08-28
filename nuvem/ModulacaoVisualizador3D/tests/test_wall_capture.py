@@ -13,6 +13,29 @@ from wall_capture import (
 
 
 class TestWallsFromCapture(unittest.TestCase):
+    def test_paredes_em_sequencia_formam_uma_parede_continua(self):
+        capture = {
+            "walls": [
+                {"element_id": "101", "start": [0, 0], "end": [120, 0],
+                 "thickness_cm": 14, "height_cm": 280, "base_z_cm": 0},
+                {"element_id": "102", "start": [120, 0], "end": [300, 0],
+                 "thickness_cm": 14, "height_cm": 280, "base_z_cm": 0},
+            ],
+            "openings": [
+                {"element_id": "201", "host_wall_id": "102", "center_cm": [210, 0],
+                 "width_cm": 80, "sill_cm": 0, "head_cm": 210},
+            ],
+        }
+
+        walls, diagnostics = walls_from_capture(capture)
+
+        self.assertEqual(len(walls), 1)
+        self.assertAlmostEqual(walls[0]["length_cm"], 300.0, places=2)
+        self.assertEqual(walls[0]["source_wall_ids"], ["101", "102"])
+        self.assertEqual(walls[0]["openings_count"], 1)
+        self.assertEqual(diagnostics["revit_walls_received"], 2)
+        self.assertEqual(diagnostics["continuous_wall_count"], 1)
+
     def test_usa_walls_existentes_como_base_geometrica(self):
         capture = {
             "level": "Nivel 1",

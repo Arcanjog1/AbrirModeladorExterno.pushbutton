@@ -169,6 +169,7 @@ from core.engine.geometry import (  # noqa: E402
 )
 from core.engine.wall_pairing import (  # noqa: E402
     find_wall_pairs, extend_wall_ends_to_junctions, deduplicate_walls,
+    merge_connected_collinear_walls,
     scan_possible_missed_bonecas, classify_unused_line_reason,
     build_wall_graph, build_plan_bounds, build_no_pairs_message,
     scan_candidate_thicknesses_cm, compute_detection_tolerance_ft,

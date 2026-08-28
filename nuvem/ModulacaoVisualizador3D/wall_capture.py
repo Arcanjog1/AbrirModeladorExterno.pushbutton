@@ -13,7 +13,8 @@ import math
 from engine_bridge import (
     FEET_PER_METER, JUNCTION_FACE_SEARCH_FT, BLOCK_JOINT_CM,
     XYZ, make_line, point_to_cm,
-    build_wall_graph, extend_wall_ends_to_junctions, assign_openings_to_walls,
+    build_wall_graph, extend_wall_ends_to_junctions, merge_connected_collinear_walls,
+    assign_openings_to_walls,
     build_wall_segments, solve_building_blocks,
 )
 
@@ -71,11 +72,47 @@ def _capture_graph_for_raw(raw_walls, openings_json):
             continue
         tuples.append(tup)
         raw_by_tuple.append(raw)
+    source_keys = [round(float(raw.get("height_cm") or 0.0), 3) for raw in raw_by_tuple]
+    tuples, source_groups = merge_connected_collinear_walls(tuples, source_keys=source_keys)
+    raw_by_tuple = [_merged_raw_wall([raw_by_tuple[i] for i in group]) for group in source_groups]
     graph_tuples, junctions_by_index, nodes, end_to_node = _graph_for_tuples(tuples)
     openings_per_wall = _assign_openings_to_raw_walls(
         graph_tuples, raw_by_tuple, _opening_objects(openings_json)
     )
     return graph_tuples, raw_by_tuple, openings_per_wall, junctions_by_index, nodes, end_to_node, skipped
+
+
+def _raw_wall_ids(raw):
+    source_ids = list(raw.get("source_wall_ids") or [])
+    if source_ids:
+        ids = []
+        for value in source_ids:
+            text = str(value or "")
+            if text and text not in ids:
+                ids.append(text)
+        return ids
+    ids = []
+    for value in (raw.get("id"), raw.get("element_id")):
+        text = str(value or "")
+        if text and text not in ids:
+            ids.append(text)
+    return ids
+
+
+def _merged_raw_wall(members):
+    """Metadados de uma cadeia colinear preservando todas as Walls fonte."""
+    result = dict(members[0])
+    source_ids = []
+    for raw in members:
+        for wall_id in _raw_wall_ids(raw):
+            if wall_id not in source_ids:
+                source_ids.append(wall_id)
+    result["source_wall_ids"] = source_ids
+    result["source_wall_count"] = len(members)
+    if len(members) > 1:
+        result["id"] = "+".join(source_ids) if source_ids else result.get("id")
+        result["element_id"] = source_ids[0] if source_ids else result.get("element_id")
+    return result
 
 
 def _opening_objects(openings_json):
@@ -101,10 +138,8 @@ def _assign_openings_to_raw_walls(graph_tuples, raw_walls, openings):
     unhosted = []
     wall_indices_by_id = {}
     for idx, raw in enumerate(raw_walls):
-        wall_indices_by_id.setdefault(_wall_id(raw, idx + 1), []).append(idx)
-        element_id = str(raw.get("element_id") or "")
-        if element_id:
-            wall_indices_by_id.setdefault(element_id, []).append(idx)
+        for wall_id in _raw_wall_ids(raw) or [_wall_id(raw, idx + 1)]:
+            wall_indices_by_id.setdefault(wall_id, []).append(idx)
 
     for opening in openings:
         host_id = opening.get("host_wall_id")
@@ -283,6 +318,8 @@ def walls_from_capture(capture):
                 "id": wall_id,
                 "element_id": str(raw.get("element_id") or wall_id),
                 "wall_group_id": wall_id,
+                "source_wall_ids": _raw_wall_ids(raw),
+                "source_wall_count": int(raw.get("source_wall_count") or 1),
                 "source": "revit_wall",
                 "start": point_to_cm(p0),
                 "end": point_to_cm(p1),
@@ -441,6 +478,10 @@ def solve_capture_block_candidates(capture):
                     if origin is None or x_dir is None or y_dir is None:
                         continue
                     wall_id = _wall_id(raw_by_tuple[wall_idx], wall_idx + 1) if isinstance(wall_idx, int) and wall_idx < len(raw_by_tuple) else None
+                    source_wall_ids = (
+                        _raw_wall_ids(raw_by_tuple[wall_idx])
+                        if isinstance(wall_idx, int) and wall_idx < len(raw_by_tuple) else []
+                    )
                     candidate_id = "{}:{}:{}:{}".format(group_key[0], wall_id or "node", course_index, len(result))
                     result.append({
                         "id": candidate_id,
@@ -450,6 +491,7 @@ def solve_capture_block_candidates(capture):
                         "course_index": course_index,
                         "wall_idx": wall_idx,
                         "wall_id": wall_id,
+                        "source_wall_ids": source_wall_ids,
                         "secondary_wall_idx": secondary_idx,
                         "origin_cm": [origin.X * FT_TO_CM, origin.Y * FT_TO_CM],
                         "z_cm": z_cm - z_reference_cm,
@@ -492,7 +534,8 @@ def solve_capture_block_candidates(capture):
             continue
         normalized_head_cm = head_cm - z_reference_cm
         has_lintel_course = any(
-            candidate.get("wall_id") == _wall_id(raw_wall, 1)
+            (host_id in (candidate.get("source_wall_ids") or [])
+             or candidate.get("wall_id") == _wall_id(raw_wall, 1))
             and candidate.get("z_cm", 0.0) + 1e-6 >= normalized_head_cm
             and candidate.get("z_cm", 0.0) + block_height_cm <= wall_top_cm - z_reference_cm + 1e-6
             for candidate in result
@@ -698,6 +741,7 @@ def enrich_openings_for_view(walls, openings_json, tolerance_cm=10.0):
                 str(wall.get("id") or ""), str(wall.get("element_id") or ""),
                 str(wall.get("wall_group_id") or ""),
             }
+            wall_ids.update(str(value) for value in (wall.get("source_wall_ids") or []))
             if host_id and host_id not in wall_ids:
                 continue
             if not host_id and opening_level and (wall.get("level") or "") != opening_level:

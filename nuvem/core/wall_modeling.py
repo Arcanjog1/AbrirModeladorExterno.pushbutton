@@ -2485,6 +2485,30 @@ def evaluate_wall_modulation(wall_ids, target_doc=None, opening_gaps=None):
     return results
 
 
+def evaluate_wall_axes_modulation(walls_to_create, created_walls_by_axis=None):
+    """Pre-checagem por eixo logico, inclusive cadeias de varias Walls.
+
+    Diferente de ``evaluate_wall_modulation``, que le cada ElementId
+    isoladamente para o updater ao vivo, esta funcao mede o comprimento do
+    eixo continuo entregue ao solver. E' a leitura correta para o fluxo de
+    Walls existentes depois de ``merge_connected_collinear_walls``.
+    """
+    results = []
+    created_walls_by_axis = created_walls_by_axis or {}
+    for wall_idx, (centerline, _thickness_ft, _locks) in enumerate(walls_to_create or []):
+        length_cm = centerline.GetEndPoint(0).DistanceTo(
+            centerline.GetEndPoint(1)
+        ) / FEET_PER_METER * 100.0
+        entry = evaluate_wall_block_length(length_cm)
+        wall_ids = [eid for eid, _origin in created_walls_by_axis.get(wall_idx, [])]
+        entry["id"] = wall_ids[0] if wall_ids else None
+        entry["wall_ids"] = wall_ids
+        entry["wall_idx"] = wall_idx
+        entry["pier_at_opening"] = False
+        results.append(entry)
+    return results
+
+
 def evaluate_opening_modulation(openings):
     """Mesma ideia de evaluate_wall_modulation, mas para a LARGURA das
     aberturas (portas/janelas) - `openings` e' a lista de dicts ja montada
@@ -11126,6 +11150,29 @@ def run_modulation_on_existing_walls():
 
     base_z_abs = selected_level.Elevation
 
+    # Walls colineares selecionadas ponta a ponta sao um unico eixo de
+    # modulacao. Mantemos todos os ElementIds no novo eixo para que refresh,
+    # zoom e ajustes continuem operando sobre as Walls reais, enquanto o
+    # solver pode posicionar um bloco atravessando a antiga divisa entre
+    # elementos. Paredes perpendiculares ficam separadas e seguem para o
+    # grafo de amarracoes L/T/X logo abaixo.
+    walls_to_create, continuity_groups = merge_connected_collinear_walls(walls_to_create)
+    if any(len(group) > 1 for group in continuity_groups):
+        old_created_walls_by_axis = created_walls_by_axis
+        created_walls_by_axis = {}
+        for new_idx, source_group in enumerate(continuity_groups):
+            entries = []
+            for old_idx in source_group:
+                entries.extend(old_created_walls_by_axis.get(old_idx) or [])
+            created_walls_by_axis[new_idx] = entries
+        try:
+            output.print_md(
+                "**Continuidade:** {} Wall(s) selecionada(s) formam {} eixo(s) "
+                "continuo(s) de modulacao.".format(len(wall_ids), len(walls_to_create))
+            )
+        except Exception:
+            pass
+
     output.print_md("**Coletando aberturas (portas/janelas) do projeto...**")
     all_openings, openings_source_note = collect_opening_instances("auto", None)
 
@@ -11148,16 +11195,26 @@ def run_modulation_on_existing_walls():
     wall_segment_geometry = {}
     for wall_idx, entries in created_walls_by_axis.items():
         centerline = walls_to_create[wall_idx][0]
-        t_a = _axis_t_of_point(centerline, centerline.GetEndPoint(0))
-        t_b = _axis_t_of_point(centerline, centerline.GetEndPoint(1))
-        if t_a > t_b:
-            t_a, t_b = t_b, t_a
-        wall_segment_geometry[wall_idx] = [
-            {"element_id": eid, "seg_origin": seg_origin, "t_a": t_a, "t_b": t_b}
-            for eid, seg_origin in entries
-        ]
+        segments = []
+        for eid, seg_origin in entries:
+            try:
+                element = doc.GetElement(eid)
+                curve = element.Location.Curve
+                t_a = _axis_t_of_point(centerline, curve.GetEndPoint(0))
+                t_b = _axis_t_of_point(centerline, curve.GetEndPoint(1))
+            except Exception:
+                t_a = _axis_t_of_point(centerline, centerline.GetEndPoint(0))
+                t_b = _axis_t_of_point(centerline, centerline.GetEndPoint(1))
+            if t_a > t_b:
+                t_a, t_b = t_b, t_a
+            segments.append({
+                "element_id": eid, "seg_origin": seg_origin, "t_a": t_a, "t_b": t_b
+            })
+        wall_segment_geometry[wall_idx] = segments
 
-    modulation_results = evaluate_wall_modulation(wall_ids, target_doc=doc)
+    modulation_results = evaluate_wall_axes_modulation(
+        walls_to_create, created_walls_by_axis
+    )
     incompatible_modulation = [r for r in modulation_results if not r["compatible"]]
 
     catalog, catalog_missing = load_fixed_block_catalog(doc)
@@ -11777,6 +11834,20 @@ def main():
     t_step = _perf_mark(
         t_step, "Deduplicacao de paredes (deduplicate_walls)",
         "{} parede(s) removida(s) por duplicidade".format(duplicates_removed_count)
+    )
+
+    # Fragmentos colineares conectados pertencem a mesma parede logica. A
+    # consolidacao acontece antes do grafo: assim a junta entre fragmentos
+    # desaparece para o preenchimento comum, mas qualquer parede
+    # perpendicular que chegue ou cruze esse eixo continua sendo detectada
+    # como T/X e recebe a amarracao correspondente.
+    t_step = _perf_begin("Consolidando paredes colineares conectadas")
+    walls_before_continuity = len(walls_to_create)
+    walls_to_create, continuity_groups = merge_connected_collinear_walls(walls_to_create)
+    continuous_fragments_merged_count = walls_before_continuity - len(walls_to_create)
+    t_step = _perf_mark(
+        t_step, "Continuidade de paredes (merge_connected_collinear_walls)",
+        "{} divisa(s) interna(s) eliminada(s)".format(continuous_fragments_merged_count)
     )
 
     # 4b. Fecha encontros em T/L: estica a ponta de cada parede ate' a FACE
