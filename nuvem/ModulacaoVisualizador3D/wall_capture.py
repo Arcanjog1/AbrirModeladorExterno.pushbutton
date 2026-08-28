@@ -233,39 +233,52 @@ def walls_from_capture(capture):
                 line, base_z_abs_ft, raw_height_cm * CM_TO_FT, openings_on_line
             )
 
+            cutout_segments = []
             for seg_idx, (sub_line, seg_height_ft, seg_base_offset_ft, seg_origin) in enumerate(segments_on_wall):
                 p0 = sub_line.GetEndPoint(0)
                 p1 = sub_line.GetEndPoint(1)
-                segment_id = (
-                    "{}_{:02d}".format(wall_id, seg_idx + 1)
-                    if len(segments_on_wall) > 1 else wall_id
-                )
-                walls.append({
-                    "id": segment_id,
-                    "element_id": str(raw.get("element_id") or wall_id),
-                    "wall_group_id": wall_id,
-                    "source": "revit_wall",
+                cutout_segments.append({
+                    "id": "{}_cut_{:02d}".format(wall_id, seg_idx + 1),
                     "start": point_to_cm(p0),
                     "end": point_to_cm(p1),
-                    "thickness_cm": round(thickness_ft * FT_TO_CM, 2),
                     "length_cm": round(p0.DistanceTo(p1) * FT_TO_CM, 2),
                     "height_cm": round(seg_height_ft * FT_TO_CM, 2),
                     "base_z_cm": round((base_z_abs_ft + seg_base_offset_ft) * FT_TO_CM, 2),
-                    "level": raw.get("level") or capture.get("level", ""),
-                    "level_elevation_cm": raw.get("level_elevation_cm"),
-                    "base_offset_cm": raw.get("base_offset_cm"),
-                    "layer": raw.get("layer") or "Walls Revit",
-                    "single_line": False,
                     "origin": "abertura" if seg_origin == "abertura" else "revit_wall",
-                    "junctions": junctions_by_index.get(idx, [None, None]) if seg_origin == "cad" else [None, None],
-                    "openings_count": len(openings_on_line),
                 })
+
+            p0 = line.GetEndPoint(0)
+            p1 = line.GetEndPoint(1)
+            walls.append({
+                "id": wall_id,
+                "element_id": str(raw.get("element_id") or wall_id),
+                "wall_group_id": wall_id,
+                "source": "revit_wall",
+                "start": point_to_cm(p0),
+                "end": point_to_cm(p1),
+                "thickness_cm": round(thickness_ft * FT_TO_CM, 2),
+                "length_cm": round(p0.DistanceTo(p1) * FT_TO_CM, 2),
+                "height_cm": round(raw_height_cm, 2),
+                "base_z_cm": round(base_z_abs_ft * FT_TO_CM, 2),
+                "level": raw.get("level") or capture.get("level", ""),
+                "level_elevation_cm": raw.get("level_elevation_cm"),
+                "base_offset_cm": raw.get("base_offset_cm"),
+                "layer": raw.get("layer") or "Walls Revit",
+                "single_line": False,
+                "origin": "revit_wall",
+                "junctions": junctions_by_index.get(idx, [None, None]),
+                "openings_count": len(openings_on_line),
+                "cutout_segments": cutout_segments,
+            })
 
     diagnostics = {
         "source_mode": "revit_walls",
         "revit_walls_received": len(raw_walls),
         "revit_walls_used": graph_wall_count,
-        "revit_wall_segments_used": len(walls),
+        "revit_wall_segments_used": sum(
+            len(wall.get("cutout_segments") or []) for wall in walls
+        ),
+        "continuous_wall_count": len(walls),
         "skipped_walls": skipped,
         "duplicates_removed": 0,
         "possible_bonecas": [],

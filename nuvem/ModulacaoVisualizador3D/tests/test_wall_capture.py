@@ -40,15 +40,16 @@ class TestWallsFromCapture(unittest.TestCase):
         walls, diagnostics = walls_from_capture(capture)
 
         self.assertEqual(diagnostics["source_mode"], "revit_walls")
-        self.assertEqual(len(walls), 3)
-        self.assertEqual(walls[0]["id"], "101_01")
+        self.assertEqual(len(walls), 1)
+        self.assertEqual(walls[0]["id"], "101")
         self.assertEqual(walls[0]["source"], "revit_wall")
-        self.assertAlmostEqual(walls[0]["length_cm"], 110.0, places=2)
+        self.assertAlmostEqual(walls[0]["length_cm"], 300.0, places=2)
         self.assertEqual(walls[0]["openings_count"], 1)
-        self.assertEqual(walls[1]["origin"], "abertura")
-        self.assertAlmostEqual(walls[1]["length_cm"], 80.0, places=2)
-        self.assertAlmostEqual(walls[1]["base_z_cm"], 210.0, places=2)
-        self.assertAlmostEqual(walls[1]["height_cm"], 70.0, places=2)
+        self.assertEqual(len(walls[0]["cutout_segments"]), 3)
+        lintel = [s for s in walls[0]["cutout_segments"] if s["origin"] == "abertura"][0]
+        self.assertAlmostEqual(lintel["length_cm"], 80.0, places=2)
+        self.assertAlmostEqual(lintel["base_z_cm"], 210.0, places=2)
+        self.assertAlmostEqual(lintel["height_cm"], 70.0, places=2)
 
     def test_enriquece_abertura_com_orientacao_da_parede(self):
         walls = [
@@ -104,8 +105,8 @@ class TestWallsFromCapture(unittest.TestCase):
         upper = [wall for wall in walls if wall["wall_group_id"] == "102"]
         self.assertEqual(len(lower), 1)
         self.assertEqual(lower[0]["base_z_cm"], 0.0)
-        self.assertEqual(len(upper), 3)
-        lintel = [wall for wall in upper if wall["origin"] == "abertura"][0]
+        self.assertEqual(len(upper), 1)
+        lintel = [s for s in upper[0]["cutout_segments"] if s["origin"] == "abertura"][0]
         self.assertEqual(lintel["base_z_cm"], 510.0)
         self.assertEqual(lintel["height_cm"], 70.0)
         self.assertEqual(diagnostics["revit_walls_used"], 2)
@@ -126,8 +127,10 @@ class TestWallsFromCapture(unittest.TestCase):
 
         walls, _diagnostics = walls_from_capture(capture)
         infills = sorted(
-            (wall["base_z_cm"], wall["height_cm"])
-            for wall in walls if wall["origin"] == "abertura"
+            (segment["base_z_cm"], segment["height_cm"])
+            for wall in walls
+            for segment in wall["cutout_segments"]
+            if segment["origin"] == "abertura"
         )
         self.assertIn((210.0, 90.0), infills)
         self.assertIn((500.0, 100.0), infills)

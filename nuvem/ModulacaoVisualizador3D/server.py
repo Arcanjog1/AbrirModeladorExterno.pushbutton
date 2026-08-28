@@ -384,6 +384,7 @@ class Handler(BaseHTTPRequestHandler):
 
         started_at = time.perf_counter()
         try:
+            preview_only = bool(body.get("preview"))
             if body.get("mode") == "auto" and not body.get("opening_id"):
                 adjusted, action, candidates, diagnostics = adjust_capture_openings(capture)
             else:
@@ -396,11 +397,14 @@ class Handler(BaseHTTPRequestHandler):
             payload = _capture_view_payload(adjusted, candidates, diagnostics)
             payload["model_id"] = model_id
             payload["adjustment"] = action
+            payload["preview"] = preview_only
             payload["performance_ms"] = {
                 "total": round((time.perf_counter() - started_at) * 1000.0, 1),
                 "cache_hit": False,
             }
             if action.get("accepted"):
+                if preview_only:
+                    return self._send_json(200, payload)
                 _remember(_CAPTURE_MODELS, model_id, adjusted)
                 for cache_key, cached_payload in list(_LOAD_CACHE.items()):
                     if cached_payload.get("model_id") == model_id:

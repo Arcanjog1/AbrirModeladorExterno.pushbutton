@@ -45,6 +45,10 @@
   #selection-panel:empty { display: none; }
   #selection-panel .sel-title { font-weight: bold; color: #8fc7ff; margin-bottom: 4px; }
   #selection-panel .sel-row { color: #ccc; }
+  #opening-context-menu { position: absolute; z-index: 5; min-width: 230px; padding: 6px; background: rgba(28,30,34,0.98); border: 1px solid #555; border-radius: 4px; box-shadow: 0 10px 28px rgba(0,0,0,0.45); display: none; }
+  #opening-context-menu button { display: block; width: 100%; margin: 0; padding: 7px 9px; text-align: left; background: transparent; color: #eee; border: 0; border-radius: 3px; }
+  #opening-context-menu button:hover { background: #353941; }
+  #opening-context-menu .menu-separator { height: 1px; background: #444; margin: 5px 2px; }
   @media (max-width: 700px) {
     html, body { height: auto; min-height: 100%; overflow-x: hidden; }
     #app { display: block; height: auto; min-height: 100%; }
@@ -106,6 +110,16 @@
   </div>
   <div id="viewport">
     <div id="selection-panel"></div>
+    <div id="opening-context-menu">
+      <button type="button" data-opening-preview="auto">Ajustar automaticamente para modulação</button>
+      <button type="button" data-opening-preview="-5">Visualizar mover -5cm</button>
+      <button type="button" data-opening-preview="-1">Visualizar mover -1cm</button>
+      <button type="button" data-opening-preview="1">Visualizar mover +1cm</button>
+      <button type="button" data-opening-preview="5">Visualizar mover +5cm</button>
+      <div class="menu-separator"></div>
+      <button type="button" data-opening-apply-preview>Aplicar preview</button>
+      <button type="button" data-opening-cancel-preview>Cancelar preview</button>
+    </div>
     <div id="view-toolbar">
       <button class="view-btn" id="view-top">Topo</button>
       <button class="view-btn" id="view-front">Frente</button>
@@ -179,6 +193,8 @@ let currentBlockCandidates = [];
 let currentCatalog = {};
 let currentModelId = null;
 let selectedOpeningId = null;
+let committedViewData = null;
+let activePreviewAction = null;
 let lastBounds = null;
 
 function clearGroup(group) {
@@ -353,6 +369,38 @@ function addBlockPreviewBoxes(wall, length, thickness, height, baseZ, angle, cen
   }
 }
 
+function addWallSolid(wall, segment, materialInfo) {
+  const [x0, y0] = segment.start;
+  const [x1, y1] = segment.end;
+  const dx = x1 - x0, dy = y1 - y0;
+  const length = Math.sqrt(dx * dx + dy * dy);
+  const angle = Math.atan2(dy, dx);
+  const thickness = wall.thickness_cm;
+  const height = segment.height_cm || wall.height_cm || WALL_HEIGHT_CM;
+  const baseZ = segment.base_z_cm || wall.base_z_cm || 0;
+
+  const geometry = new THREE.BoxGeometry(length, thickness, height);
+  const material = new THREE.MeshLambertMaterial({
+    color: materialInfo.color,
+    transparent: true,
+    opacity: materialInfo.opacity,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  const centerX = (x0 + x1) / 2;
+  const centerY = (y0 + y1) / 2;
+  mesh.position.set(centerX, centerY, baseZ + height / 2);
+  mesh.rotation.z = angle;
+  mesh.userData = { kind: 'wall', wall, isError: materialInfo.isError };
+  wallGroup.add(mesh);
+
+  const edges = new THREE.EdgesGeometry(geometry);
+  const edgeLine = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, opacity: 0.4, transparent: true }));
+  edgeLine.position.copy(mesh.position);
+  edgeLine.rotation.copy(mesh.rotation);
+  edgeLine.userData = { kind: 'wall-edge', isError: materialInfo.isError };
+  wallGroup.add(edgeLine);
+}
+
 function addWallBox(wall) {
   const [x0, y0] = wall.start;
   const [x1, y1] = wall.end;
@@ -365,27 +413,16 @@ function addWallBox(wall) {
   const closes = wall.modulation && wall.modulation.closes;
   const isError = wall.single_line || !closes;
   const blocks = wall.modulation && wall.modulation.blocks;
-
-  const geometry = new THREE.BoxGeometry(length, thickness, height);
-  const material = new THREE.MeshLambertMaterial({
+  const materialInfo = {
     color: wall.single_line ? 0xe53935 : (closes ? 0x4caf50 : 0xe53935),
-    transparent: true,
     opacity: blocks ? 0.18 : 0.85,
-  });
-  const mesh = new THREE.Mesh(geometry, material);
-  const centerX = (x0 + x1) / 2;
-  const centerY = (y0 + y1) / 2;
-  mesh.position.set(centerX, centerY, baseZ + height / 2);
-  mesh.rotation.z = angle;
-  mesh.userData = { kind: 'wall', wall, isError };
-  wallGroup.add(mesh);
+    isError,
+  };
 
-  const edges = new THREE.EdgesGeometry(geometry);
-  const edgeLine = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, opacity: 0.4, transparent: true }));
-  edgeLine.position.copy(mesh.position);
-  edgeLine.rotation.copy(mesh.rotation);
-  edgeLine.userData = { kind: 'wall-edge', isError };
-  wallGroup.add(edgeLine);
+  const solids = wall.cutout_segments && wall.cutout_segments.length
+    ? wall.cutout_segments
+    : [wall];
+  solids.forEach(segment => addWallSolid(wall, segment, materialInfo));
 
   // eixo da parede (referência no plano do chão)
   const axisGeom = new THREE.BufferGeometry().setFromPoints([
@@ -531,6 +568,7 @@ function clearSelectionHighlight() {
   selectedObject = null;
   selectedOriginalColor = null;
   selectedOpeningId = null;
+  hideOpeningContextMenu();
   document.getElementById('btn-auto-adjust').disabled = !currentModelId;
   requestRender();
 }
@@ -595,14 +633,10 @@ function selectObject(obj, instanceId = null) {
 }
 
 canvasEl.addEventListener('mousedown', (e) => { mouseDownPos = [e.clientX, e.clientY]; });
-canvasEl.addEventListener('click', (e) => {
-  if (mouseDownPos) {
-    const moved = Math.hypot(e.clientX - mouseDownPos[0], e.clientY - mouseDownPos[1]);
-    if (moved > 4) return; // foi um drag, nao um clique de selecao
-  }
+function pickObjectAt(clientX, clientY) {
   const rect = canvasEl.getBoundingClientRect();
-  mouseNdc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  mouseNdc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  mouseNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  mouseNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(mouseNdc, camera);
 
   const pickables = [];
@@ -620,13 +654,50 @@ canvasEl.addEventListener('click', (e) => {
   }
   const hits = raycaster.intersectObjects(pickables, false);
   if (hits.length) {
-    const preferred = hits.find(hit => hit.object.userData.kind === 'opening')
+    return hits.find(hit => hit.object.userData.kind === 'opening')
       || hits.find(hit => hit.object.userData.kind === 'block-instances')
       || hits[0];
-    selectObject(preferred.object, preferred.instanceId);
+  }
+  return null;
+}
+
+canvasEl.addEventListener('click', (e) => {
+  if (mouseDownPos) {
+    const moved = Math.hypot(e.clientX - mouseDownPos[0], e.clientY - mouseDownPos[1]);
+    if (moved > 4) return; // foi um drag, nao um clique de selecao
+  }
+  hideOpeningContextMenu();
+  const hit = pickObjectAt(e.clientX, e.clientY);
+  if (hit) {
+    selectObject(hit.object, hit.instanceId);
   } else {
     clearSelectionHighlight();
     document.getElementById('selection-panel').innerHTML = '';
+  }
+});
+
+function hideOpeningContextMenu() {
+  document.getElementById('opening-context-menu').style.display = 'none';
+}
+
+function showOpeningContextMenu(event, openingObj) {
+  selectObject(openingObj);
+  const menu = document.getElementById('opening-context-menu');
+  const rect = viewport.getBoundingClientRect();
+  const left = Math.min(event.clientX - rect.left, rect.width - menu.offsetWidth - 8);
+  const top = Math.min(event.clientY - rect.top, rect.height - menu.offsetHeight - 8);
+  menu.style.left = Math.max(8, left) + 'px';
+  menu.style.top = Math.max(8, top) + 'px';
+  menu.style.display = 'block';
+}
+
+canvasEl.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const hit = pickObjectAt(e.clientX, e.clientY);
+  if (hit && hit.object.userData.kind === 'opening') {
+    showOpeningContextMenu(e, hit.object);
+  } else {
+    hideOpeningContextMenu();
   }
 });
 
@@ -741,6 +812,10 @@ function renderModulationData(data, options = {}) {
   currentBlockCandidates = data.block_candidates || [];
   currentCatalog = data.catalog || {};
   currentModelId = data.model_id || null;
+  if (!options.preview) {
+    committedViewData = data;
+    activePreviewAction = null;
+  }
   currentWalls.forEach(addWallBox);
   if (currentBlockCandidates.length) renderSolvedBlocks(currentBlockCandidates);
   renderOpenings(currentOpenings);
@@ -764,7 +839,7 @@ function renderModulationData(data, options = {}) {
   let summaryText;
   if (data.source_mode === 'revit_walls' && solver.status === 'ok') {
     const conflicts = (solver.collision_count || 0) + (solver.non_modular_count || 0) + (solver.jamb_exception_count || 0);
-    summaryText = `${currentWalls.length} região(ões) de parede · ${solver.candidate_count || 0} bloco(s) resolvido(s).`;
+    summaryText = `${currentWalls.length} parede(s) contínua(s) · ${solver.candidate_count || 0} bloco(s) resolvido(s).`;
     summaryText += conflicts ? `\n${conflicts} conflito(s) do solver exigem ajuste.` : '\nModulação validada sem conflitos pelo solver.';
   } else {
     summaryText = `${currentWalls.length} parede(s) — ${closesCount} fecham em blocos, ${currentWalls.length - closesCount} precisam de ajuste.`;
@@ -898,23 +973,24 @@ async function pickJsonCapture() {
   }
 }
 
-async function adjustSelectedOpening(mode, deltaCm = null) {
+async function adjustSelectedOpening(mode, deltaCm = null, preview = false) {
   if (!currentModelId || (mode === 'manual' && !selectedOpeningId)) {
     setStatus(mode === 'manual' ? 'Selecione uma abertura da captura do Revit.' : 'Carregue uma captura do Revit.', true);
     return;
   }
   const btn = document.getElementById('btn-auto-adjust');
   btn.disabled = true;
-  setStatus(mode === 'auto' ? 'Testando ajustes permitidos com o solver...' : 'Validando ajuste manual com o solver...');
+  setStatus(preview ? 'Gerando preview validado pelo solver...' : (mode === 'auto' ? 'Testando ajustes permitidos com o solver...' : 'Validando ajuste manual com o solver...'));
   try {
     const res = await fetch('/api/adjust-opening', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model_id: currentModelId,
-        opening_id: mode === 'manual' ? selectedOpeningId : null,
+        opening_id: (mode === 'manual' || selectedOpeningId) ? selectedOpeningId : null,
         mode,
         delta_cm: deltaCm,
+        preview,
       }),
     });
     const data = await res.json();
@@ -925,7 +1001,12 @@ async function adjustSelectedOpening(mode, deltaCm = null) {
     }
     const action = data.adjustment || {};
     const actions = Array.isArray(action.actions) ? action.actions : [action];
-    renderModulationData(data, { adjustment: { actions } });
+    renderModulationData(data, { adjustment: { actions }, preview });
+    if (preview) {
+      activePreviewAction = { mode, deltaCm, openingId: selectedOpeningId };
+      setStatus('Preview calculado e validado. Use Aplicar preview ou Cancelar preview no menu da abertura.');
+      return;
+    }
     if (Array.isArray(action.actions)) {
       const accepted = action.actions.filter(item => item.accepted);
       const changes = accepted.map(item => `${item.opening_id}: ${item.delta_cm > 0 ? '+' : ''}${item.delta_cm}cm`).join(', ');
@@ -938,6 +1019,22 @@ async function adjustSelectedOpening(mode, deltaCm = null) {
   }
 }
 
+function cancelOpeningPreview() {
+  if (!committedViewData) return;
+  renderModulationData(committedViewData);
+  activePreviewAction = null;
+  setStatus('Preview cancelado.');
+}
+
+async function applyOpeningPreview() {
+  if (!activePreviewAction) {
+    setStatus('Nenhum preview ativo para aplicar.', true);
+    return;
+  }
+  selectedOpeningId = activePreviewAction.openingId;
+  await adjustSelectedOpening(activePreviewAction.mode, activePreviewAction.deltaCm, false);
+}
+
 document.getElementById('btn-pick-dwg').addEventListener('click', pickAndConvertDwg);
 document.getElementById('btn-pick-json').addEventListener('click', pickJsonCapture);
 document.getElementById('btn-layers').addEventListener('click', loadLayers);
@@ -946,6 +1043,25 @@ document.getElementById('btn-auto-adjust').addEventListener('click', () => adjus
 document.getElementById('selection-panel').addEventListener('click', (event) => {
   const button = event.target.closest('[data-opening-shift]');
   if (button) adjustSelectedOpening('manual', parseFloat(button.dataset.openingShift));
+});
+document.getElementById('opening-context-menu').addEventListener('click', async (event) => {
+  const previewButton = event.target.closest('[data-opening-preview]');
+  if (previewButton) {
+    const value = previewButton.dataset.openingPreview;
+    hideOpeningContextMenu();
+    if (value === 'auto') await adjustSelectedOpening('auto', null, true);
+    else await adjustSelectedOpening('manual', parseFloat(value), true);
+    return;
+  }
+  if (event.target.closest('[data-opening-apply-preview]')) {
+    hideOpeningContextMenu();
+    await applyOpeningPreview();
+    return;
+  }
+  if (event.target.closest('[data-opening-cancel-preview]')) {
+    hideOpeningContextMenu();
+    cancelOpeningPreview();
+  }
 });
 
 document.getElementById('view-top').addEventListener('click', () => setView('top'));
