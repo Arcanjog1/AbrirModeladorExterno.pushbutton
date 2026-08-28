@@ -43,6 +43,8 @@ Rotas:
         da Wall e reaplica a mesma modulação física.
     POST /api/resize-opening        -> altera a largura de uma abertura
         hospedada, preservando-a inteiramente dentro da Wall.
+    POST /api/calculate-modulation  -> calcula alternativas manuais para
+        uma Wall ou uma lista de Walls, usando catálogo/regras do projeto.
 """
 
 import json
@@ -70,6 +72,7 @@ from file_dialog import pick_dwg_file, pick_json_file, DialogError
 from oda_converter import convert_dwg_to_dxf, OdaNotFoundError, OdaConversionError
 from layer_matcher import analyze_layers
 from wall_validation import validate_walls
+from modulation_calculator import calculate_project_solutions, calculate_wall_solutions
 
 VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 _LOAD_CACHE = OrderedDict()
@@ -263,6 +266,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_move_opening()
         if parsed.path == "/api/resize-opening":
             return self._handle_resize_opening()
+        if parsed.path == "/api/calculate-modulation":
+            return self._handle_calculate_modulation()
 
         return self._send_json(404, {"error": "rota desconhecida"})
 
@@ -594,6 +599,24 @@ class Handler(BaseHTTPRequestHandler):
             if not action.get("accepted"):
                 return self._send_json(409, {"edit": action})
             return self._commit_capture_edit(model_id, edited, action, started_at)
+        except Exception as exc:
+            traceback.print_exc()
+            return self._send_json(500, {"error": str(exc)})
+
+    def _handle_calculate_modulation(self):
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        try:
+            model_id = str(body.get("model_id") or "")
+            model = _CAPTURE_MODELS.get(model_id) if model_id else None
+            catalog = (model or {}).get("catalog") if model else body.get("catalog")
+            if body.get("walls") is not None:
+                result = calculate_project_solutions(body, catalog=catalog)
+            else:
+                result = calculate_wall_solutions(body, catalog=catalog)
+            return self._send_json(200 if result.get("ok") else 400, result)
         except Exception as exc:
             traceback.print_exc()
             return self._send_json(500, {"error": str(exc)})

@@ -10,7 +10,7 @@
   #viewport { flex-grow: 1; position: relative; }
   h1 { font-size: 16px; margin: 0 0 12px; }
   label { display: block; font-size: 12px; color: #aaa; margin-top: 10px; }
-  input[type=text], select { width: 100%; box-sizing: border-box; padding: 6px 8px; background: #111; color: #eee; border: 1px solid #444; border-radius: 4px; margin-top: 4px; }
+  input[type=text], input[type=number], select, textarea { width: 100%; box-sizing: border-box; padding: 6px 8px; background: #111; color: #eee; border: 1px solid #444; border-radius: 4px; margin-top: 4px; }
   button { margin-top: 10px; padding: 8px 12px; background: #2f6fed; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
   button:hover { background: #4783ff; }
   button.secondary { background: #444; }
@@ -30,6 +30,11 @@
   #summary { font-size: 12px; margin-top: 12px; padding: 8px; background: #26282c; border-radius: 4px; }
   #validation-banner { font-size: 12px; margin-top: 12px; padding: 10px; border-radius: 4px; background: #3a2a1a; border: 1px solid #a35a1a; color: #ffcf8e; white-space: pre-wrap; }
   #validation-banner:empty { display: none; }
+  #calculator-results { font-size: 12px; margin-top: 8px; white-space: normal; }
+  .calc-solution { border-top: 1px solid #3a3d43; padding: 7px 0; }
+  .calc-solution:first-child { border-top: 0; }
+  .calc-score { color: #8ee08e; font-weight: bold; }
+  .calc-blocks { color: #8fc7ff; font-family: Consolas, monospace; margin-top: 3px; }
   canvas { display: block; }
   #legend { position: absolute; bottom: 12px; left: 12px; font-size: 12px; background: rgba(0,0,0,0.5); padding: 8px 10px; border-radius: 4px; }
   #legend span { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: middle; }
@@ -93,6 +98,40 @@
     <div id="status"></div>
     <div id="validation-banner"></div>
     <div id="summary"></div>
+
+    <label>Calculadora de modulação</label>
+    <input type="number" id="calc-length" min="1" step="0.1" placeholder="Comprimento da parede (cm)">
+    <select id="calc-left-tie">
+      <option value="livre">Amarração esquerda: parede livre</option>
+      <option value="L">Amarração esquerda: encontro em L/quina</option>
+      <option value="T">Amarração esquerda: encontro em T</option>
+      <option value="cruzamento">Amarração esquerda: cruzamento</option>
+      <option value="outra">Amarração esquerda: outra (exige geometria)</option>
+    </select>
+    <select id="calc-right-tie">
+      <option value="livre">Amarração direita: parede livre</option>
+      <option value="L">Amarração direita: encontro em L/quina</option>
+      <option value="T">Amarração direita: encontro em T</option>
+      <option value="cruzamento">Amarração direita: cruzamento</option>
+      <option value="outra">Amarração direita: outra (exige geometria)</option>
+    </select>
+    <input type="number" id="calc-course" min="1" step="1" value="1" placeholder="Fiada">
+    <select id="calc-priority">
+      <option value="balanced">Prioridade: equilíbrio construtivo</option>
+      <option value="fewest_small">Prioridade: menos peças pequenas</option>
+      <option value="fewest_blocks">Prioridade: menos blocos</option>
+      <option value="economy">Prioridade: economia de material</option>
+    </select>
+    <select id="calc-max-results">
+      <option value="3">Mostrar as 3 melhores</option>
+      <option value="5" selected>Mostrar as 5 melhores</option>
+      <option value="10">Mostrar as 10 melhores</option>
+      <option value="100">Mostrar todas (até 100)</option>
+    </select>
+    <button id="btn-calculate" class="secondary">Calcular soluções</button>
+    <textarea id="calc-project-walls" rows="3" placeholder='Modo projeto (opcional): [{"id":"P1","length_cm":324,"left_tie":"L","right_tie":"cruzamento"}]'></textarea>
+    <button id="btn-calculate-project" class="secondary">Calcular lista de paredes</button>
+    <div id="calculator-results"></div>
 
     <label>Modos de visualização</label>
     <div id="view-modes">
@@ -870,6 +909,79 @@ function parseLayers() {
   return raw.split(',').map(s => s.trim()).filter(Boolean);
 }
 
+function renderCalculatorResult(data) {
+  const container = document.getElementById('calculator-results');
+  if (data.walls) {
+    container.innerHTML = `<div><b>Modo projeto — paredes independentes</b><br><span class="hint">${data.note || ''}</span></div>`
+      + data.walls.map(wall => {
+        const best = (wall.solutions || [])[0];
+        return `<div class="calc-solution"><b>${wall.wall_id}</b>: ${wall.total_found || 0} solução(ões)`
+          + (best ? `<div class="calc-score">#1 ${best.score}/100 · ${best.classification}</div><div class="calc-blocks">${best.sequence.map(code => `[${code}]`).join('')}</div>` : '')
+          + `</div>`;
+      }).join('');
+    return;
+  }
+  const solutions = data.solutions || [];
+  if (!solutions.length) {
+    container.textContent = `Nenhuma solução válida. ${(data.rejected_conditions || []).join(' ') || 'Revise o comprimento, catálogo e amarrações.'}`;
+    return;
+  }
+  container.innerHTML = `<div><b>${data.total_found} solução(ões) válida(s)</b> · junta ${data.joint_cm}cm<br><span class="hint">${data.note || ''}</span></div>`
+    + solutions.map(solution => `<div class="calc-solution">`
+      + `<span class="calc-score">#${solution.rank} · ${solution.classification} · ${solution.score}/100</span>`
+      + `<div>${solution.left_tie} → ${solution.right_tie} · ${solution.metrics.total_blocks} bloco(s), ${solution.metrics.compensators} compensador(es)</div>`
+      + `<div class="calc-blocks">${solution.sequence.map(code => `[${code}]`).join('')}</div>`
+      + (solution.assumptions.length ? `<div class="hint">${solution.assumptions.join(' · ')}</div>` : '')
+      + `</div>`).join('');
+}
+
+async function calculateModulation(payload) {
+  const results = document.getElementById('calculator-results');
+  results.textContent = 'Calculando combinações válidas com juntas e amarrações...';
+  try {
+    const response = await fetch('/api/calculate-modulation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, model_id: currentModelId || undefined }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      results.textContent = data.error || 'Não foi possível calcular as soluções.';
+      return;
+    }
+    renderCalculatorResult(data);
+  } catch (error) {
+    results.textContent = 'Falha ao consultar a calculadora: ' + error;
+  }
+}
+
+function calculateSingleWall() {
+  const length = Number(document.getElementById('calc-length').value);
+  if (!Number.isFinite(length) || length <= 0) {
+    setStatus('Informe o comprimento da parede na calculadora.', true);
+    return;
+  }
+  calculateModulation({
+    length_cm: length,
+    left_tie: document.getElementById('calc-left-tie').value,
+    right_tie: document.getElementById('calc-right-tie').value,
+    course: Number(document.getElementById('calc-course').value) || 1,
+    priority: document.getElementById('calc-priority').value,
+    max_results: Number(document.getElementById('calc-max-results').value) || 5,
+  });
+}
+
+function calculateWallList() {
+  const raw = document.getElementById('calc-project-walls').value.trim();
+  if (!raw) { setStatus('Cole uma lista JSON de paredes para usar o modo projeto.', true); return; }
+  try {
+    const walls = JSON.parse(raw);
+    if (!Array.isArray(walls)) throw new Error('A lista deve começar com [ e terminar com ].');
+    calculateModulation({ walls });
+  } catch (error) {
+    setStatus('Lista de paredes inválida: ' + error.message, true);
+  }
+}
+
 async function loadLayers() {
   const path = document.getElementById('dxf-path').value.trim();
   if (!path) { setStatus('Informe o caminho do arquivo DXF.', true); return; }
@@ -1185,6 +1297,8 @@ document.getElementById('btn-pick-json').addEventListener('click', pickJsonCaptu
 document.getElementById('btn-layers').addEventListener('click', loadLayers);
 document.getElementById('btn-load').addEventListener('click', loadModulation);
 document.getElementById('btn-auto-adjust').addEventListener('click', () => adjustSelectedOpening('auto'));
+document.getElementById('btn-calculate').addEventListener('click', calculateSingleWall);
+document.getElementById('btn-calculate-project').addEventListener('click', calculateWallList);
 document.getElementById('selection-panel').addEventListener('click', (event) => {
   const wallButton = event.target.closest('[data-wall-edit]');
   if (wallButton) {

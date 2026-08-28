@@ -121,6 +121,9 @@ do arquivo DXF".
   Ao soltar, o visualizador propaga a geometria hospedada e recalcula os
   blocos pelo mesmo solver físico; o inspetor mostra o motivo exato caso a
   Wall deixe de ser modulável.
+- Calculadora manual: recebe comprimento, amarrações nas duas pontas, fiada
+  e prioridade; enumera e classifica alternativas usando juntas reais e o
+  catálogo carregado. Também aceita uma lista JSON de Walls independentes.
 
 ## Fluxos e limites
 
@@ -138,6 +141,10 @@ do arquivo DXF".
   Wall contínua, suas aberturas hospedadas e a componente de encontros
   afetada; o envio das alterações aprovadas de volta ao documento Revit
   ainda não faz parte deste fluxo.
+- A calculadora manual mostra hipóteses quando a geometria de um T/L/X não
+  foi fornecida. A otimização global só será habilitada quando receber o
+  grafo de encontros do projeto — não trata paredes isoladas como se fossem
+  uma solução global validada.
 
 ## Testes
 
