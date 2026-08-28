@@ -222,6 +222,32 @@ class _ThreadStub(object):
         self._target()
 
 
+class _DotNetList(list):
+    """Duble de System.Collections.Generic.List<T>: uma list do Python com
+    o `.Add()`/`.Count` do .NET por cima. So' o suficiente para o codigo do
+    motor que monta um ICollection<ElementId> de verdade - `List[ElementId]()`
+    em _execute_create (Delete em lote do lote anterior) e em _execute_zoom."""
+
+    def Add(self, item):
+        self.append(item)
+
+    @property
+    def Count(self):
+        return len(self)
+
+
+class _GenericTypeStub(object):
+    """`List[Tipo]` no .NET fecha um tipo generico; aqui basta devolver algo
+    chamavel que produza um _DotNetList. Aceita tambem `List()` direto, para
+    nao quebrar nenhum chamador antigo do duble anterior (`lambda: []`)."""
+
+    def __getitem__(self, _item_type):
+        return _DotNetList
+
+    def __call__(self, *args, **kwargs):
+        return _DotNetList()
+
+
 class ElementId(object):
     InvalidElementId = None
 
@@ -302,6 +328,52 @@ class _StubExternalEvent(_Inert):
     @classmethod
     def Create(cls, handler):
         return cls()
+
+
+class _StubPlane(object):
+    """Duble de Autodesk.Revit.DB.Plane - so' a fabrica que
+    create_building_blocks usa (CreateByNormalAndOrigin), guardando normal
+    e origem para o teste conferir em torno de QUE plano a peca foi
+    espelhada."""
+
+    def __init__(self, normal, origin):
+        self.Normal = normal
+        self.Origin = origin
+
+    @staticmethod
+    def CreateByNormalAndOrigin(normal, origin):
+        return _StubPlane(normal, origin)
+
+
+class _StubElementTransformUtils(object):
+    """Duble de ElementTransformUtils que REGISTRA as transformacoes
+    pedidas (`calls`), em vez de so' nao explodir.
+
+    Por que uma INSTANCIA (nao uma classe inerte como o resto): `_Inert.
+    __getattr__` e' metodo de instancia e nunca intercepta acesso a
+    atributo de CLASSE - `ElementTransformUtils.RotateElement` estourava
+    AttributeError, e como create_building_blocks tem try/except por
+    candidato, a peca rotacionada/espelhada virava "falha" em silencio.
+    Resultado: os dois unicos caminhos de create_building_blocks que
+    chamam a API de transformacao NUNCA foram exercitados pela suite
+    offline. Registrando as chamadas da' para testar de fora do Revit o
+    que ate' entao so' dava para conferir ao vivo: QUAIS pecas rotacionam,
+    em torno de que eixo e por que angulo, e quais espelham em que plano.
+    Metodos nao declarados aqui (MoveElement, CopyElement, ...) continuam
+    estourando AttributeError como antes - de proposito, para nao mudar em
+    silencio o comportamento de nenhum outro teste ja existente.
+
+    NAO substitui conferencia no Revit real (o duble nao move nada de
+    verdade) - ver tests/README.md."""
+
+    def __init__(self):
+        self.calls = []
+
+    def RotateElement(self, document, element_id, axis, angle_radians):
+        self.calls.append(("rotate", element_id, axis, angle_radians))
+
+    def MirrorElement(self, document, element_id, plane):
+        self.calls.append(("mirror", element_id, plane))
 
 
 class _StubTransaction(object):
@@ -707,7 +779,7 @@ def install():
         Thread=_ThreadStub, ThreadStart=(lambda target: target),
     )
     module("System.Collections")
-    module("System.Collections.Generic", List=lambda *a, **k: [])
+    module("System.Collections.Generic", List=_GenericTypeStub())
     module(
         "System.Drawing",
         Font=Font, FontFamily=FontFamily, Color=Color, Size=Size,
@@ -743,14 +815,16 @@ def install():
         "LocationCurve", "CompoundStructure", "Solid", "ViewDetailLevel",
         "OverrideGraphicSettings", "FillPatternElement", "IUpdater",
         "UpdaterId", "UpdaterRegistry", "ChangePriority", "SubTransaction",
-        "Element", "ElementTransformUtils", "ElementClassFilter",
-        "FamilySymbol", "PlanarFace", "StorageType", "TransactionGroup", "Plane",
+        "Element", "ElementClassFilter",
+        "FamilySymbol", "PlanarFace", "StorageType", "TransactionGroup",
     ]
     db_attrs = dict((name, _inert_class(name)) for name in db_names)
     db_attrs["Color"] = _inert_class("RevitColor")
     db_attrs.update({
         "XYZ": XYZ, "Line": Line, "Curve": Curve, "Transform": Transform,
         "ElementId": ElementId, "Transaction": _StubTransaction,
+        # instancia (nao classe) de proposito - ver _StubElementTransformUtils
+        "ElementTransformUtils": _StubElementTransformUtils(), "Plane": _StubPlane,
         # _Enum (instancia), nao _inert_class: BuiltInParameter e' sempre
         # usado como namespace de constantes (BuiltInParameter.ALGO), nunca
         # instanciado/subclasseado - um _Enum de verdade responde a

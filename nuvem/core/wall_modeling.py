@@ -3623,8 +3623,68 @@ def _course_z_abs(base_z_abs, course_index, course_height_ft):
     return base_z_abs + _cm_to_ft(FIRST_COURSE_Z_OFFSET_CM) + course_index * course_height_ft
 
 
+# Uma atualizacao de tela (barra + log) a cada N pecas durante a criacao -
+# ver o `progress_cb` de create_building_blocks. Cada atualizacao passa por
+# Application.DoEvents() (ver _ProgressConsole), que nao e' de graca: a 1
+# por peca, o custo de DESENHAR a barra dominaria a propria medicao numa
+# planta de 200 mil instancias. A 1 a cada 500, o custo fica em ~400
+# repintagens no lote inteiro (irrelevante) e o usuario ainda ve' a barra
+# andando varias vezes por segundo.
+CREATE_PROGRESS_STEP = 500
+
+
+def _make_perf_clock():
+    """Relogio monotonico de ALTA RESOLUCAO para cronometrar a Etapa 5.
+
+    `time.time()` no IronPython/Windows resolve na casa dos 15,6ms (o tick
+    do relogio do sistema) - inutil para medir uma chamada de API que dura
+    fracao de milissegundo: quase toda leitura individual daria zero. O
+    Stopwatch do .NET usa o contador de alta frequencia do processador
+    (QueryPerformanceCounter, resolucao sub-microsegundo) e e' barato o
+    bastante para ser chamado 2 a 6 vezes por peca sem falsear a medicao.
+
+    Fora do Revit (suite offline, dubles em CPython) `System.Diagnostics`
+    nao existe - cai para `time.time()`, que la' e' monotonico o bastante
+    para os testes. A chamada de prova com `isinstance(..., float)` esta'
+    aqui de proposito: um duble que devolva um objeto inerte no lugar do
+    timestamp precisa cair no fallback, nunca produzir numero falso."""
+    try:
+        from System.Diagnostics import Stopwatch as _Stopwatch
+        frequency = float(_Stopwatch.Frequency)
+        if frequency <= 0:
+            raise ValueError("Stopwatch.Frequency invalida")
+        get_timestamp = _Stopwatch.GetTimestamp
+
+        def _stopwatch_clock():
+            return get_timestamp() / frequency
+
+        if not isinstance(_stopwatch_clock(), float):
+            raise TypeError("Stopwatch nao devolveu um numero real")
+        return _stopwatch_clock
+    except Exception:
+        return time.time
+
+
+_perf_clock = _make_perf_clock()
+
+
+def _new_create_perf():
+    """Estrutura zerada do PERFIL DE TEMPO da Etapa 5 (ver
+    create_building_blocks). Chaves em segundos terminam em `_s`; as
+    demais sao contagens."""
+    return {
+        "instances": 0, "planned_total": 0, "failed_count": 0,
+        "total_s": 0.0, "activate_s": 0.0, "loop_s": 0.0,
+        "commit_s": 0.0, "assimilate_s": 0.0,
+        "new_instance_s": 0.0, "new_instance_calls": 0,
+        "rotate_s": 0.0, "rotate_calls": 0,
+        "mirror_s": 0.0, "mirror_calls": 0,
+        "aux_geometry_s": 0.0, "failed_s": 0.0,
+    }
+
+
 def create_building_blocks(target_doc, candidates, catalog, base_z_abs, selected_level, num_courses,
-                           course_candidates=None):
+                           course_candidates=None, progress_cb=None, stage_cb=None):
     """Ponto de entrada da Etapa 5: cria no Revit, dentro de um unico
     TransactionGroup, as FamilyInstance correspondentes a `candidates` (ver
     solve_building_blocks), repetidas em `num_courses` FIADAS FISICAS
@@ -3666,16 +3726,43 @@ def create_building_blocks(target_doc, candidates, catalog, base_z_abs, selected
     "logical_code", "course", "course_index"} - usado pelo modo debug
     visual da Etapa 6 (colorir por codigo / filtrar Fiada A/B), que precisa
     dos ElementId REAIS (os candidatos sozinhos nao tem - so' existem depois
-    desta funcao rodar)."""
+    desta funcao rodar).
+
+    `progress_cb(feitas, total, fiada_1based, num_courses)` e
+    `stage_cb(rotulo)` (ambos opcionais) dao FEEDBACK AO VIVO na tela.
+    Nao sao enfeite: esta etapa roda no thread principal do Revit, dentro
+    de uma Transaction (nao pode ir para thread de fundo - transacao exige
+    contexto de API), entao ate' existirem a janela ficava MUDA do primeiro
+    ao ultimo bloco. Numa planta de 306 eixos x 15 fiadas isso e' da ordem
+    de 200 MIL instancias, e o usuario nao tinha como distinguir "criando,
+    devagar" de "travado" (2026-08-27, relato com a janela parada em
+    "Criando blocos..."). `progress_cb` e' chamado a cada
+    CREATE_PROGRESS_STEP pecas, nunca a cada peca.
+
+    "perf" no dict devolvido e' o PERFIL DE TEMPO desta etapa (ver
+    _new_create_perf): total, tempo do laco, tempo do Commit isolado e
+    tempo ACUMULADO em cada chamada de API (NewFamilyInstance,
+    RotateElement, MirrorElement) com a contagem de quantas pecas passaram
+    por cada uma - nem toda peca rotaciona, nem toda peca espelha. Medir
+    isto e' o passo 1 obrigatorio do Item 1 (acelerar a criacao): fora do
+    Revit nao ha' como cronometrar a API real (os dubles nao sao o Revit),
+    e sem numero qualquer otimizacao aqui seria chute. Se o Commit dominar
+    (o Revit regenera o modelo no commit), mexer nas chamadas individuais
+    nao adianta e o caminho e' outro."""
     height_source = candidates if candidates else (
         [c for cs in (course_candidates or {}).values() for c in cs]
     )
+    perf = _new_create_perf()
+    clock = _perf_clock
+    t_function_start = clock()
+
     course_height_ft, height_error = _course_height_ft(catalog, height_source)
     if course_height_ft is None:
+        perf["total_s"] = clock() - t_function_start
         return {
             "created_count": 0, "failures": [],
             "course_height_ft": None, "course_height_error": height_error,
-            "created_instances": [],
+            "created_instances": [], "perf": perf,
         }
 
     used_codes = sorted(set(c["logical_code"] for c in height_source))
@@ -3687,6 +3774,29 @@ def create_building_blocks(target_doc, candidates, catalog, base_z_abs, selected
     ]
     created_count = 0
     created_instances = []
+
+    # Os candidatos de CADA fiada fisica, resolvidos UMA vez so' - o laco
+    # de criacao abaixo consome esta lista em vez de refiltrar `candidates`
+    # a cada volta. Nao muda em nada QUAIS pecas sao criadas (e' o mesmo
+    # criterio de sempre, so' movido para fora); serve para saber o TOTAL
+    # de instancias ANTES de comecar, sem o qual nao existe barra de
+    # progresso (nem estimativa de quanto falta) nesta etapa.
+    course_sources = []
+    for course_index in range(num_courses):
+        if course_candidates is not None:
+            course_sources.append(course_candidates.get(course_index) or [])
+        else:
+            course_letter = "A" if course_index % 2 == 0 else "B"
+            course_sources.append([c for c in candidates if c["course"] == course_letter])
+    perf["planned_total"] = sum(len(source) for source in course_sources)
+
+    if stage_cb is not None:
+        try:
+            stage_cb("criando {} instancia(s) de bloco em {} fiada(s)".format(
+                perf["planned_total"], num_courses
+            ))
+        except Exception:
+            pass
 
     group = TransactionGroup(target_doc, "Etapa 5 - Cria blocos estruturais")
     group.Start()
@@ -3700,6 +3810,7 @@ def create_building_blocks(target_doc, candidates, catalog, base_z_abs, selected
         # como garantia extra (idempotente, symbol.IsActive ja e' True em
         # uso normal). Regenerate() DENTRO da transacao (nao depois do
         # Commit) - mesmo motivo/teste via MCP de load_fixed_block_catalog.
+        t_activate_start = clock()
         t_activate = Transaction(target_doc, "Ativa tipos de bloco")
         t_activate.Start()
         try:
@@ -3715,10 +3826,13 @@ def create_building_blocks(target_doc, candidates, catalog, base_z_abs, selected
         except Exception:
             t_activate.RollBack()
             raise
+        perf["activate_s"] = clock() - t_activate_start
 
         t_create = Transaction(target_doc, "Cria instancias de bloco")
         t_create.Start()
         try:
+            t_loop_start = clock()
+            done = 0
             # BUG REAL #2 medido ao vivo (2026-08-21, mesmo teste que achou o
             # bug do Z absoluto acima): este laco colocava TODOS os
             # candidatos (fiada A e fiada B juntas) na MESMA cota Z a cada
@@ -3734,15 +3848,12 @@ def create_building_blocks(target_doc, candidates, catalog, base_z_abs, selected
             # `num_courses_for_wall_height` ja calculava (nao precisou
             # mudar - so' este laco estava interpretando errado).
             for course_index in range(num_courses):
-                course_letter = "A" if course_index % 2 == 0 else "B"
                 course_z_abs = _course_z_abs(base_z_abs, course_index, course_height_ft)
-                if course_candidates is not None:
-                    course_source = course_candidates.get(course_index) or []
-                else:
-                    course_source = [c for c in candidates if c["course"] == course_letter]
+                course_source = course_sources[course_index]
                 for cand in course_source:
                     entry = catalog.get(cand["logical_code"])
                     if entry is None:
+                        done += 1  # conta para a barra nao parar em 99%
                         continue  # ja reportado em missing_codes, uma vez, acima
                     symbol = entry["symbol"]
                     origin = cand["origin_world"]
@@ -3762,16 +3873,31 @@ def create_building_blocks(target_doc, candidates, catalog, base_z_abs, selected
                     # (log/relatorio) continuam usando.
                     course_offset_ft = course_z_abs - base_z_abs
                     point = XYZ(origin.X, origin.Y, course_offset_ft)
+                    # CRONOMETRO POR CHAMADA DE API (ver "perf" no docstring
+                    # desta funcao). `t_mark` anda a cada medicao: cada
+                    # trecho cobra o tempo desde a marca anterior, entao
+                    # NewFamilyInstance/RotateElement/MirrorElement e a
+                    # geometria auxiliar (Line/Plane) sao separaveis sem
+                    # nenhuma leitura de relogio a mais do que o necessario.
+                    t_piece = clock()
                     try:
                         instance = target_doc.Create.NewFamilyInstance(
                             point, symbol, selected_level, StructuralType.NonStructural
                         )
+                        t_mark = clock()
+                        perf["new_instance_s"] += t_mark - t_piece
+                        perf["new_instance_calls"] += 1
                         rotation_deg = cand.get("rotation_deg") or 0.0
                         if abs(rotation_deg) > 1e-6:
                             axis = Line.CreateBound(point, XYZ(point.X, point.Y, point.Z + 1.0))
+                            t_geometry = clock()
+                            perf["aux_geometry_s"] += t_geometry - t_mark
                             ElementTransformUtils.RotateElement(
                                 target_doc, instance.Id, axis, math.radians(rotation_deg)
                             )
+                            t_mark = clock()
+                            perf["rotate_s"] += t_mark - t_geometry
+                            perf["rotate_calls"] += 1
                         # Orientacao do compensador (regra #3, 2026-08-25 -
                         # ver orient_compensator_candidates/ETAPA 4D, que
                         # ja' decidiu "mirrored" a partir da posicao REAL
@@ -3783,7 +3909,12 @@ def create_building_blocks(target_doc, candidates, catalog, base_z_abs, selected
                         # lado, sem mudar posicao nem largura/altura.
                         if cand.get("mirrored"):
                             mirror_plane = Plane.CreateByNormalAndOrigin(cand["x_dir"], point)
+                            t_geometry = clock()
+                            perf["aux_geometry_s"] += t_geometry - t_mark
                             ElementTransformUtils.MirrorElement(target_doc, instance.Id, mirror_plane)
+                            t_mark = clock()
+                            perf["mirror_s"] += t_mark - t_geometry
+                            perf["mirror_calls"] += 1
                         created_count += 1
                         created_instances.append({
                             "id": instance.Id, "logical_code": cand["logical_code"],
@@ -3797,26 +3928,176 @@ def create_building_blocks(target_doc, candidates, catalog, base_z_abs, selected
                             "candidate_key": id(cand),
                         })
                     except Exception as ex:
+                        # A peca que FALHA tambem consome tempo do Revit -
+                        # contabilizado a parte para nao sumir do total (e
+                        # para nao inflar a media por peca criada).
+                        perf["failed_s"] += clock() - t_piece
+                        perf["failed_count"] += 1
                         failures.append(
                             "fiada {}/{} - bloco {} ({}) em ({:.2f}, {:.2f}): {}".format(
                                 course_index + 1, num_courses, cand["logical_code"],
                                 cand.get("placement_reason", "?"), origin.X, origin.Y, str(ex)
                             )
                         )
+                    done += 1
+                    if progress_cb is not None and done % CREATE_PROGRESS_STEP == 0:
+                        try:
+                            progress_cb(done, perf["planned_total"], course_index + 1, num_courses)
+                        except Exception:
+                            pass  # feedback de tela NUNCA derruba a criacao
+            perf["loop_s"] = clock() - t_loop_start
+
+            # COMMIT ISOLADO: o Revit REGENERA o modelo no Commit, e essa
+            # regeneracao e' feita de uma vez so' para tudo que a transacao
+            # acumulou. Por isso ele e' medido sozinho - se for ele que
+            # domina o tempo desta etapa, reduzir/agrupar as chamadas de
+            # API individuais do laco acima nao adianta nada.
+            if stage_cb is not None:
+                try:
+                    stage_cb("Transaction.Commit() - o Revit esta' regenerando o modelo")
+                except Exception:
+                    pass
+            t_commit_start = clock()
             t_create.Commit()
+            perf["commit_s"] = clock() - t_commit_start
         except Exception:
             t_create.RollBack()
             raise
+        t_assimilate_start = clock()
         group.Assimilate()
+        perf["assimilate_s"] = clock() - t_assimilate_start
     except Exception:
         group.RollBack()
         raise
 
+    perf["instances"] = created_count
+    perf["total_s"] = clock() - t_function_start
     return {
         "created_count": created_count, "failures": failures,
         "course_height_ft": course_height_ft, "course_height_error": None,
-        "created_instances": created_instances,
+        "created_instances": created_instances, "perf": perf,
     }
+
+
+def _fmt_perf_seconds(seconds):
+    """Segundos legiveis. Acima de 2 minutos mostra tambem min+s - uma
+    criacao de 200 mil blocos passa de "1234.5s", que ninguem le' de
+    cabeca, para "1234.5s (20min 35s)"."""
+    seconds = max(0.0, float(seconds or 0.0))
+    if seconds >= 120.0:
+        return "{:.1f}s ({}min {:02d}s)".format(
+            seconds, int(seconds // 60), int(round(seconds % 60))
+        )
+    return "{:.2f}s".format(seconds)
+
+
+def _fmt_perf_share(seconds, total_s):
+    if not total_s:
+        return ""
+    return " - {:.1f}% do total".format(100.0 * float(seconds or 0.0) / total_s)
+
+
+def _fmt_perf_each(seconds, calls):
+    """Custo MEDIO por chamada, em milissegundos - o numero que diz se
+    vale a pena atacar aquela chamada (uma API de 3ms x 200 mil pecas =
+    10 minutos; uma de 0,01ms nao aparece no relogio)."""
+    if not calls:
+        return "nenhuma chamada"
+    return "{} chamada(s), {:.3f}ms cada".format(calls, 1000.0 * float(seconds or 0.0) / calls)
+
+
+def format_create_perf_report(create_result):
+    """Bloco de texto com o PERFIL DE TEMPO da Etapa 5, a partir do que
+    create_building_blocks mediu ("perf") e do que _execute_create mediu em
+    volta dela ("perf_steps"). Devolve "" quando nao ha' medicao (ex.:
+    create_result vindo do cache de uma execucao antiga, ou de um duble de
+    teste que nao instrumenta nada).
+
+    Existe como funcao de modulo, e nao como metodo da janela, para poder
+    ser exercitada pela suite offline: e' o UNICO pedaco da instrumentacao
+    que da' para testar fora do Revit - os tempos em si so' existem com a
+    API real (ver tests/README.md)."""
+    perf = (create_result or {}).get("perf") or {}
+    steps = (create_result or {}).get("perf_steps") or []
+    if not perf and not steps:
+        return ""
+
+    lines = ["=== PERFIL DE TEMPO DA CRIACAO (Etapa 5) ==="]
+    total_s = float(perf.get("total_s") or 0.0)
+    instances = perf.get("instances") or 0
+    if perf:
+        planned = perf.get("planned_total") or 0
+        lines.append(
+            "Instancias criadas: {} de {} planejada(s); {} falha(s) na criacao.".format(
+                instances, planned, perf.get("failed_count") or 0
+            )
+        )
+        per_instance = (1000.0 * total_s / instances) if instances else 0.0
+        lines.append("Tempo total de create_building_blocks: {}{}".format(
+            _fmt_perf_seconds(total_s),
+            " ({:.3f}ms por instancia)".format(per_instance) if instances else "",
+        ))
+        lines.append("  - Ativacao dos FamilySymbol (transacao propria): {}{}".format(
+            _fmt_perf_seconds(perf.get("activate_s")),
+            _fmt_perf_share(perf.get("activate_s"), total_s),
+        ))
+        loop_s = float(perf.get("loop_s") or 0.0)
+        lines.append("  - Laco de criacao (todas as chamadas de API, SEM o Commit): {}{}".format(
+            _fmt_perf_seconds(loop_s), _fmt_perf_share(loop_s, total_s)
+        ))
+        lines.append("      * NewFamilyInstance: {} em {}".format(
+            _fmt_perf_seconds(perf.get("new_instance_s")),
+            _fmt_perf_each(perf.get("new_instance_s"), perf.get("new_instance_calls")),
+        ))
+        lines.append("      * RotateElement: {} em {}".format(
+            _fmt_perf_seconds(perf.get("rotate_s")),
+            _fmt_perf_each(perf.get("rotate_s"), perf.get("rotate_calls")),
+        ))
+        lines.append("      * MirrorElement: {} em {}".format(
+            _fmt_perf_seconds(perf.get("mirror_s")),
+            _fmt_perf_each(perf.get("mirror_s"), perf.get("mirror_calls")),
+        ))
+        lines.append("      * Geometria auxiliar (Line.CreateBound/Plane.CreateByNormalAndOrigin): {}".format(
+            _fmt_perf_seconds(perf.get("aux_geometry_s"))
+        ))
+        if perf.get("failed_count"):
+            lines.append("      * Pecas que falharam (tempo gasto mesmo assim): {}".format(
+                _fmt_perf_seconds(perf.get("failed_s"))
+            ))
+        # O que sobra do laco depois de descontar as chamadas de API e' o
+        # Python puro da volta (dict do candidato, catalogo, XYZ, append) -
+        # se ele dominar, o gargalo NAO esta' na API do Revit.
+        measured = sum(float(perf.get(key) or 0.0) for key in (
+            "new_instance_s", "rotate_s", "mirror_s", "aux_geometry_s", "failed_s"
+        ))
+        lines.append("      * Resto do laco em Python puro (dicts/catalogo/XYZ/append): {}".format(
+            _fmt_perf_seconds(max(0.0, loop_s - measured))
+        ))
+        commit_s = float(perf.get("commit_s") or 0.0)
+        lines.append("  - Transaction.Commit() SOZINHO (o Revit regenera o modelo aqui): {}{}".format(
+            _fmt_perf_seconds(commit_s), _fmt_perf_share(commit_s, total_s)
+        ))
+        lines.append("  - TransactionGroup.Assimilate(): {}{}".format(
+            _fmt_perf_seconds(perf.get("assimilate_s")),
+            _fmt_perf_share(perf.get("assimilate_s"), total_s),
+        ))
+        contabilizado = sum(float(perf.get(key) or 0.0) for key in (
+            "activate_s", "loop_s", "commit_s", "assimilate_s"
+        ))
+        lines.append("  - Preparo/nao contabilizado acima: {}".format(
+            _fmt_perf_seconds(max(0.0, total_s - contabilizado))
+        ))
+
+    if steps:
+        lines.append('Outras etapas do clique "criar" (fora de create_building_blocks):')
+        for label, seconds, detail in steps:
+            lines.append("  - {}: {}{}".format(
+                label, _fmt_perf_seconds(seconds), " ({})".format(detail) if detail else ""
+            ))
+        lines.append("  - SOMA do clique inteiro: {}".format(
+            _fmt_perf_seconds(sum(float(seconds or 0.0) for _label, seconds, _detail in steps))
+        ))
+    return "\n".join(lines)
 
 
 def _colliding_created_instance_ids(candidates, collisions, created_instances):
@@ -7952,6 +8233,9 @@ class _PostCreationEventHandler(IExternalEventHandler):
         # "wall_result_cb" (mesmos nomes de solve_building_blocks_all_courses)
         # - None desabilita (comportamento antigo, silencioso).
         self.solve_progress_cb = None
+        # Mesmo papel de solve_progress_cb, para a Etapa 5 ("criar"):
+        # {"progress_cb", "stage_cb"} - ver _on_create_click/_execute_create.
+        self.create_progress_cb = None
         # Funcoes capturadas como atributos de instancia (nao pelo nome do
         # modulo) - mesmo motivo dos dois handlers antigos que este
         # substitui: o pyRevit reexecuta este Script.py do zero a cada
@@ -8425,21 +8709,81 @@ class _PostCreationEventHandler(IExternalEventHandler):
         # completo ANTES de criar o novo, cada clique em "criar" passa a
         # ser uma SUBSTITUICAO atomica (nunca uma soma) - o modelo nunca
         # mistura pecas de dois calculos diferentes.
+
+        # PERFIL DE TEMPO do "criar" INTEIRO (rotulo, segundos, detalhe) -
+        # mesmo formato do `perf_stats` da Etapa 1. create_building_blocks
+        # cronometra o que acontece DENTRO dela (ver o "perf" que devolve);
+        # aqui ficam as etapas que sao dela irmas e tambem custam tempo de
+        # relogio no clique "criar": apagar o lote anterior, cruzar as
+        # colisoes com as instancias reais e pintar o realce vermelho.
+        perf_steps = []
+        cbs = self.create_progress_cb or {}
+        stage_cb = cbs.get("stage_cb")
+
+        def _stage(label):
+            if stage_cb is not None:
+                try:
+                    stage_cb(label)
+                except Exception:
+                    pass
+
         previous_instances = (self.create_result or {}).get("created_instances") or []
         if previous_instances:
+            _stage("apagando o lote anterior de {} bloco(s)".format(len(previous_instances)))
+            t_delete_start = _perf_clock()
             t_cleanup = self._Transaction(app_doc, "Remove lote anterior de blocos (recalculo)")
             t_cleanup.Start()
             try:
+                # EXCLUSAO EM LOTE - a UNICA otimizacao que a medicao desta
+                # etapa aprovou (feita ao vivo via MCP em 2026-08-28, com a
+                # instrumentacao que este mesmo arquivo passou a expor).
+                # Nas MESMAS 10.741 pecas de uma planta real de 306 eixos,
+                # apagadas pelos dois caminhos com um RollBack entre as duas
+                # medidas para que ambos removessem exatamente o mesmo
+                # conjunto: Document.Delete(ICollection<ElementId>) leva
+                # 1,82s (0,170 ms/el) contra 6,70s (0,624 ms/el) de um
+                # Delete por elemento - 3,7x mais rapido, 4,9s a menos em
+                # cada recalculo.
+                #
+                # A sondagem GetElement CONTINUA aqui, e nao por inercia:
+                # custa 0,04s no lote inteiro (~0,004 ms/el, medida separada
+                # do Delete) e e' o que torna o lote SEGURO. Delete de uma
+                # colecao com UM unico ElementId invalido lanca e nao apaga
+                # NADA, enquanto o laco antigo simplesmente pulava a peca
+                # invalida; filtrar antes preserva exatamente a tolerancia
+                # que o laco tinha ("peca ja' apagada/invalida nunca trava a
+                # recriacao"), agora numa chamada so'.
+                stale_ids = List[ElementId]()
                 for item in previous_instances:
                     try:
-                        elem = app_doc.GetElement(item["id"])
-                        if elem is not None:
-                            app_doc.Delete(item["id"])
+                        if app_doc.GetElement(item["id"]) is not None:
+                            stale_ids.Add(item["id"])
                     except Exception:
                         pass  # peca ja' apagada/invalida - nunca trava a recriacao
+                if len(stale_ids):
+                    try:
+                        app_doc.Delete(stale_ids)
+                    except Exception:
+                        # Rede de seguranca: se o Revit recusar a colecao
+                        # inteira (uma peca que a sondagem aprovou mas o
+                        # Delete rejeita), volta ao caminho antigo. Apagar
+                        # TUDO importa mais que apagar rapido - um lote
+                        # anterior sobrevivendo pela metade e' exatamente o
+                        # bug de 2026-08-25 ("parte da parede andou e parte
+                        # ficou na posicao antiga") pela porta dos fundos.
+                        for stale_id in stale_ids:
+                            try:
+                                app_doc.Delete(stale_id)
+                            except Exception:
+                                pass
                 t_cleanup.Commit()
             except Exception:
                 t_cleanup.RollBack()
+            perf_steps.append((
+                "Exclusao do lote anterior (sondagem + Delete em lote)",
+                _perf_clock() - t_delete_start,
+                "{} instancia(s) do lote anterior".format(len(previous_instances)),
+            ))
 
         course_candidates = self.solve_result.get("course_candidates") if self.solve_result else None
         candidates = self.solve_result["candidates"] if self.solve_result else []
@@ -8469,10 +8813,17 @@ class _PostCreationEventHandler(IExternalEventHandler):
             wall_bond_audits = (self.solve_result or {}).get("wall_bond_audits") or {}
             reproved_wall_idxs = {wi for wi, audit in wall_bond_audits.items() if not audit["ok"]}
 
+            t_create_start = _perf_clock()
             self.create_result = self._create_building_blocks(
                 app_doc, candidates, self.catalog, self.base_z_abs,
-                self.selected_level, num_courses, course_candidates=course_candidates
+                self.selected_level, num_courses, course_candidates=course_candidates,
+                progress_cb=cbs.get("progress_cb"), stage_cb=stage_cb,
             )
+            perf_steps.append((
+                "create_building_blocks (criacao das FamilyInstance)",
+                _perf_clock() - t_create_start,
+                "{} instancia(s) criada(s)".format(self.create_result.get("created_count", 0)),
+            ))
             # Nao ha' mais "parede sem bloco": skipped_* fica sempre vazio,
             # mantido so' por compatibilidade com quem le' create_result.
             self.create_result["skipped_wall_count"] = 0
@@ -8481,6 +8832,8 @@ class _PostCreationEventHandler(IExternalEventHandler):
             self.create_result["reproved_wall_idxs"] = sorted(reproved_wall_idxs)
             # Colisao entre pecas: pedido explicito do usuario (2026-08-24)
             # continua valendo - lanca mesmo assim, so' marca em vermelho.
+            _stage("cruzando colisoes/auditoria com as pecas criadas")
+            t_cross_start = _perf_clock()
             collisions = (self.solve_result or {}).get("collisions") or []
             colliding_ids = self._colliding_created_instance_ids(
                 candidates, collisions, self.create_result.get("created_instances") or []
@@ -8493,7 +8846,16 @@ class _PostCreationEventHandler(IExternalEventHandler):
                 candidates, wall_bond_audits, self.create_result.get("created_instances") or []
             )
             highlight_ids = list(set(colliding_ids) | set(bond_reproved_ids))
+            perf_steps.append((
+                "Cruzamento colisoes/amarracao x instancias criadas",
+                _perf_clock() - t_cross_start,
+                "{} par(es) de colisao, {} peca(s) a marcar".format(
+                    len(collisions), len(highlight_ids)
+                ),
+            ))
             if highlight_ids:
+                _stage("marcando {} peca(s) em vermelho".format(len(highlight_ids)))
+                t_highlight_start = _perf_clock()
                 t_highlight = self._Transaction(app_doc, "Realce vermelho de colisoes/paredes sem modulacao aprovada")
                 t_highlight.Start()
                 try:
@@ -8512,6 +8874,13 @@ class _PostCreationEventHandler(IExternalEventHandler):
                     t_highlight.Commit()
                 except Exception:
                     t_highlight.RollBack()
+                perf_steps.append((
+                    "Realce vermelho (SetElementOverrides) das pecas suspeitas",
+                    _perf_clock() - t_highlight_start,
+                    "{} peca(s) marcada(s)".format(len(highlight_ids)),
+                ))
+        if self.create_result is not None:
+            self.create_result["perf_steps"] = perf_steps
         self._save_modulation_state_cache()
         if self.on_done:
             self.on_done("create", None)
@@ -9500,14 +9869,53 @@ class _PostCreationForm(Form):
 
     def _on_create_click(self, sender, args):
         self._set_busy(self._create_button, "Criando blocos...")
+
+        # FEEDBACK AO VIVO DA ETAPA 5 (2026-08-27, relato do usuario: a
+        # janela ficava em "Criando blocos..." e os blocos "nao apareciam" -
+        # sem nenhuma forma de distinguir criacao lenta de travamento).
+        # Reusa o MESMO console do solver (e' a mesma tela) - a criacao roda
+        # no thread principal do Revit, dentro de uma Transaction, e cada
+        # atualizacao passa por Application.DoEvents(), que e' o que permite
+        # a janela repintar sem thread de fundo (proibida aqui: transacao do
+        # Revit exige contexto de API). Dai' o passo grosso de
+        # CREATE_PROGRESS_STEP pecas entre atualizacoes - ver la'.
+        console = self._solve_console
+        console.log("Etapa 5: criando as instancias de bloco no Revit...")
+        console.set_status("Criando blocos no Revit...")
+        console.set_indeterminate("Preparando a criacao dos blocos...")
+        console.start_watchdog()
+
+        def _create_progress_cb(done, total, course, num_courses):
+            try:
+                console.set_progress(done, total, "{}/{} bloco(s) criado(s) - fiada {}/{}".format(
+                    done, total, course, num_courses
+                ))
+            except Exception:
+                pass
+
+        def _create_stage_cb(label):
+            try:
+                console.log("Criando blocos: {}...".format(label))
+                console.set_status("Criando blocos: {}...".format(label))
+                console.set_indeterminate(label)
+            except Exception:
+                pass
+
+        self._handler.create_progress_cb = {
+            "progress_cb": _create_progress_cb, "stage_cb": _create_stage_cb,
+        }
         if not self._raise_action("create", self._on_create_done, self._create_status):
+            console.stop_watchdog()
+            console.mark_failed("Falha ao disparar a criacao dos blocos.")
             self._create_button.Text = "Lancar Blocos - criar no Revit (todas as fiadas ate o pe-direito)"
             self._create_button.Enabled = True
 
     def _on_create_done(self, kind, error, show_summary_alert=True):
+        self._solve_console.stop_watchdog()
         self._create_button.Text = "Lancar Blocos - criar no Revit (todas as fiadas ate o pe-direito)"
         self._create_button.Enabled = True
         if kind == "error":
+            self._solve_console.mark_failed("Falha ao criar os blocos: {}".format(error))
             self._create_status.Text = "Falha: {}".format(error)
             self._create_status.ForeColor = self._UI_WARN
             return
@@ -9552,6 +9960,18 @@ class _PostCreationForm(Form):
             )
         self._append_log("\n".join(report_lines))
 
+        # PERFIL DE TEMPO (Item 1 - acelerar a criacao): vai para o log
+        # JUNTO com o resultado, em toda execucao. E' a unica medicao
+        # possivel desta etapa - a API real do Revit nao existe fora dele,
+        # entao nao ha' como cronometrar isto na suite offline nem estimar
+        # de fora (ver format_create_perf_report).
+        perf_report = format_create_perf_report(result)
+        if perf_report:
+            self._append_log(perf_report)
+            self._solve_console.log(
+                "Perfil de tempo da criacao registrado no log (secao 'PERFIL DE TEMPO DA CRIACAO')."
+            )
+
         # RELATORIO FINAL CONSOLIDADO (pedido explicito do usuario,
         # 2026-08-25, item 4/5) - so' pode ser montado AQUI, no fim de
         # tudo: precisa do resultado da Etapa 3B (self._handler.error_rows,
@@ -9579,6 +9999,12 @@ class _PostCreationForm(Form):
         self._create_status.ForeColor = self._UI_OK if result["created_count"] > 0 else self._UI_WARN
 
         has_blocks = result["created_count"] > 0
+        if has_blocks:
+            self._solve_console.mark_complete("{} bloco(s) criado(s) no Revit.".format(
+                result["created_count"]
+            ))
+        else:
+            self._solve_console.mark_failed("Nenhum bloco foi criado - veja o log.")
         for ctrl in (self._debug_color_check, self._debug_filter_both,
                      self._debug_filter_a, self._debug_filter_b):
             ctrl.Enabled = has_blocks
