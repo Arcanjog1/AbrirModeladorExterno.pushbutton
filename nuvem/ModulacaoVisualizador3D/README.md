@@ -116,6 +116,11 @@ do arquivo DXF".
   origem e a parede a que ela foi associada (`wall_pairing.
   associate_entities_with_walls` — aproximação geométrica, não um
   rastreamento exato interno do motor).
+- Edição dinâmica da captura Revit: selecione uma Wall e use **Arrastar
+  parede/início/fim**, ou selecione uma abertura e use **Arrastar abertura**.
+  Ao soltar, o visualizador propaga a geometria hospedada e recalcula os
+  blocos pelo mesmo solver físico; o inspetor mostra o motivo exato caso a
+  Wall deixe de ser modulável.
 
 ## Fluxos e limites
 
@@ -129,9 +134,10 @@ do arquivo DXF".
   contém de forma confiável níveis, hosts, portas/janelas nem a geometria
   das famílias. A análise de layers é opcional e executada apenas pelo
   botão próprio, para não bloquear a geração em desenhos grandes.
-- Os ajustes são mantidos na sessão do Modelador Externo. O envio das
-  alterações aprovadas de volta ao documento Revit ainda não faz parte
-  deste fluxo.
+- Os ajustes são mantidos na sessão do Modelador Externo. Eles atualizam a
+  Wall contínua, suas aberturas hospedadas e a componente de encontros
+  afetada; o envio das alterações aprovadas de volta ao documento Revit
+  ainda não faz parte deste fluxo.
 
 ## Testes
 

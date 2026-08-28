@@ -24,6 +24,34 @@ FT_TO_CM = 100.0 / FEET_PER_METER
 
 FIRST_COURSE_Z_OFFSET_CM = 1.0
 OPENING_COURSE_BAND_TOLERANCE_CM = 0.5
+MIN_EDITABLE_WALL_LENGTH_CM = 1.0
+
+
+def _xy_point(value, field_name):
+    """Normaliza um ponto editado na interface e rejeita geometria invalida."""
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        raise ValueError("{} deve conter coordenadas X e Y".format(field_name))
+    point = (float(value[0]), float(value[1]))
+    if not all(math.isfinite(component) for component in point):
+        raise ValueError("{} contem uma coordenada invalida".format(field_name))
+    return point
+
+
+def _line_projection(point, start, end):
+    """Parametro e ponto projetado de ``point`` no eixo ``start -> end``."""
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-9:
+        raise ValueError("eixo da parede sem comprimento")
+    t = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_sq
+    return t, (start[0] + t * dx, start[1] + t * dy)
+
+
+def _point_on_line(start, end, t):
+    return [
+        round(start[0] + (end[0] - start[0]) * t, 6),
+        round(start[1] + (end[1] - start[1]) * t, 6),
+    ]
 
 
 def capture_z_reference_cm(capture):
@@ -384,8 +412,56 @@ def _catalog_from_json(catalog_json):
     return catalog
 
 
-def solve_capture_block_candidates(capture):
-    """Resolve fiadas fisicas por nivel e serializa a geometria real."""
+def _wall_solver_status(entry, raw):
+    """Serializa o resultado do solver em uma explicação exibível por Wall."""
+    validation = entry.get("validation") or {}
+    non_modular = entry.get("non_modular") or []
+    alignment = entry.get("alignment_conflicts") or []
+    if non_modular:
+        issue = non_modular[0]
+        if issue.get("conflict") == "SEM_ESPACO":
+            reason = "abertura ou encontro ocupa todo o trecho livre"
+        else:
+            reason = (
+                "trecho de {:.1f}cm nao fecha com o catalogo e as juntas atuais"
+                .format(float(issue.get("current_length_cm") or 0.0))
+            )
+        code = "NON_MODULAR"
+    elif alignment:
+        reason = "as fiadas criam junta vertical coincidente; o solver nao aceitou a solucao"
+        code = "ALIGNMENT_CONFLICT"
+    elif not validation.get("ok", False):
+        problems = validation.get("problems") or []
+        reason = "; ".join(str(problem) for problem in problems) or "falha na validacao de encontros"
+        code = "VALIDATION_FAILURE"
+    else:
+        reason = "modulada com as regras do solver"
+        code = "MODULABLE"
+    return {
+        "wall_idx": entry.get("wall_idx"),
+        "wall_id": _wall_id(raw, int(entry.get("wall_idx") or 0) + 1),
+        "source_wall_ids": _raw_wall_ids(raw),
+        "ok": code == "MODULABLE",
+        "code": code,
+        "reason": reason,
+        "candidate_count": int(entry.get("candidate_count") or 0),
+    }
+
+
+def _merge_wall_status(statuses, candidate):
+    """Conserva a pior situação de uma Wall quando ela aparece em várias faixas."""
+    existing = statuses.get(candidate["wall_id"])
+    if existing is None or (existing.get("ok") and not candidate.get("ok")):
+        statuses[candidate["wall_id"]] = candidate
+
+
+def solve_capture_block_candidates(capture, group_keys=None):
+    """Resolve fiadas físicas por nível/faixa e serializa a geometria real.
+
+    ``group_keys`` permite recalcular somente as faixas independentes
+    alteradas por uma edição interativa. Sem esse argumento o comportamento
+    é idêntico ao carregamento inicial e resolve toda a captura.
+    """
     catalog = _catalog_from_json(capture.get("catalog"))
     if not catalog or not capture.get("walls"):
         return [], {"status": "skipped", "reason": "sem catalogo ou sem Walls Revit"}
@@ -403,9 +479,15 @@ def solve_capture_block_candidates(capture):
         "intersection_failure_count": 0, "validation_failure_count": 0,
         "door_void_violation_count": 0,
     }
+    wall_statuses = {}
     z_reference_cm = capture_z_reference_cm(capture)
+    requested_groups = None
+    if group_keys is not None:
+        requested_groups = set((str(key[0]), float(key[1])) for key in group_keys)
 
     for group_key, group_raw_walls, group_openings in _capture_wall_groups(capture):
+        if requested_groups is not None and (str(group_key[0]), float(group_key[1])) not in requested_groups:
+            continue
         graph_tuples, raw_by_tuple, openings_per_wall, _junctions_by_index, nodes, end_to_node, group_skipped = _capture_graph_for_raw(
             group_raw_walls, group_openings
         )
@@ -454,6 +536,12 @@ def solve_capture_block_candidates(capture):
                 1 for validation in (run.get("validations") or []) if not validation.get("ok")
             )
             counters["door_void_violation_count"] += len(run.get("door_void_violations") or [])
+            for entry in run.get("per_wall") or []:
+                wall_idx = entry.get("wall_idx")
+                if isinstance(wall_idx, int) and 0 <= wall_idx < len(raw_by_tuple):
+                    _merge_wall_status(
+                        wall_statuses, _wall_solver_status(entry, raw_by_tuple[wall_idx])
+                    )
 
             for course_index in band["course_indices"]:
                 course_letter = "A" if course_index % 2 == 0 else "B"
@@ -504,6 +592,7 @@ def solve_capture_block_candidates(capture):
                         "cells_local_cm": entry.get("cells_local_cm") or [],
                         "color_rgb": entry.get("color_rgb"),
                         "placement_reason": cand.get("placement_reason"),
+                        "solver_group_key": [group_key[0], group_key[1]],
                     })
         level_runs.append({"level": group_key[0], "base_z_cm": base_z_cm, "bands": len(bands), "courses": num_courses})
 
@@ -562,6 +651,8 @@ def solve_capture_block_candidates(capture):
         "course_step_cm": course_step_cm,
         "first_course_offset_cm": FIRST_COURSE_Z_OFFSET_CM,
         "z_reference_cm": round(z_reference_cm, 3),
+        "wall_statuses": [wall_statuses[key] for key in sorted(wall_statuses)],
+        "processed_group_keys": [[entry["level"], entry["base_z_cm"]] for entry in level_runs],
     }
     return result, diagnostics
 
@@ -583,6 +674,213 @@ def _solution_quality(diagnostics, candidates=None):
         -int(diagnostics.get("main_block_count") or 0),
         int(diagnostics.get("candidate_count") or 0),
     )
+
+
+def _find_capture_display_wall(capture, wall_id):
+    """Localiza a Wall contínua mostrada pelo visualizador.
+
+    Uma Wall mostrada pode representar várias Walls de origem colineares. A
+    edição deve atuar no eixo contínuo, nunca em apenas um fragmento interno,
+    para que uma ponta arrastada não abra uma fenda entre os fragmentos.
+    """
+    wanted = str(wall_id or "")
+    for wall in walls_from_capture(capture)[0]:
+        ids = {str(wall.get("id") or ""), str(wall.get("element_id") or "")}
+        ids.update(str(value) for value in (wall.get("source_wall_ids") or []))
+        if wanted in ids:
+            return wall
+    return None
+
+
+def _source_ids_for_display_wall(wall):
+    ids = [str(value) for value in (wall.get("source_wall_ids") or []) if str(value)]
+    if not ids:
+        ids = [str(wall.get("element_id") or wall.get("id") or "")]
+    return set(value for value in ids if value)
+
+
+def _affected_wall_ids(capture, source_ids):
+    """Retorna a componente de encontros afetada por uma edição.
+
+    O solver já isola níveis/faixas de base; dentro de uma faixa, só Walls
+    conectadas por um nó L/T/X (ou cruzamento) precisam ser destacadas como
+    dependentes diretas. A lista é diagnóstico para a UI e também evita que
+    uma alteração pareça afetar o projeto inteiro silenciosamente.
+    """
+    affected = set()
+    for _key, group_raw_walls, group_openings in _capture_wall_groups(capture):
+        graph, raw_by_tuple, _openings, _junctions, nodes, _end_to_node, _skipped = _capture_graph_for_raw(
+            group_raw_walls, group_openings
+        )
+        selected = {
+            index for index, raw in enumerate(raw_by_tuple)
+            if _source_ids_for_display_wall(raw) & source_ids
+        }
+        if not selected:
+            continue
+        adjacency = dict((index, set()) for index in range(len(graph)))
+        for node in nodes:
+            involved = set(index for index, _end in (node.get("arms") or []))
+            involved.update(node.get("crossing_walls") or [])
+            for index in involved:
+                adjacency.setdefault(index, set()).update(involved - {index})
+        pending = list(selected)
+        visited = set(selected)
+        while pending:
+            index = pending.pop()
+            for neighbor in adjacency.get(index, ()):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    pending.append(neighbor)
+        for index in visited:
+            if index < len(raw_by_tuple):
+                affected.update(_source_ids_for_display_wall(raw_by_tuple[index]))
+    return sorted(affected)
+
+
+def _group_keys_for_source_ids(capture, source_ids):
+    """Faixas independentes do solver que contêm uma das Walls alteradas."""
+    keys = []
+    for key, group_raw_walls, _group_openings in _capture_wall_groups(capture):
+        if any(set(_raw_wall_ids(raw)) & source_ids for raw in group_raw_walls):
+            keys.append([key[0], key[1]])
+    return keys
+
+
+def _group_source_ids(capture, group_keys):
+    requested = set((str(key[0]), float(key[1])) for key in (group_keys or []))
+    ids = set()
+    for key, group_raw_walls, _group_openings in _capture_wall_groups(capture):
+        if (str(key[0]), float(key[1])) in requested:
+            for raw in group_raw_walls:
+                ids.update(_raw_wall_ids(raw))
+    return sorted(ids)
+
+
+def edit_capture_wall(capture, wall_id, start_cm=None, end_cm=None):
+    """Edita uma Wall contínua e propaga o deslocamento às suas aberturas.
+
+    Esta é a única porta de edição geométrica do modelo externo. Ela mantém
+    os fragmentos Revit que compõem o eixo na mesma razão paramétrica e move
+    as aberturas hospedadas com o eixo. Em seguida o chamador roda o mesmo
+    ``solve_capture_block_candidates`` da modulação inicial; não há regra de
+    preview paralela para a geometria editada.
+    """
+    display_wall = _find_capture_display_wall(capture, wall_id)
+    if display_wall is None:
+        return capture, {"accepted": False, "reason": "parede nao encontrada"}
+
+    old_start = _xy_point(display_wall.get("start"), "inicio atual")
+    old_end = _xy_point(display_wall.get("end"), "fim atual")
+    new_start = _xy_point(start_cm if start_cm is not None else old_start, "inicio")
+    new_end = _xy_point(end_cm if end_cm is not None else old_end, "fim")
+    new_length = math.hypot(new_end[0] - new_start[0], new_end[1] - new_start[1])
+    if new_length < MIN_EDITABLE_WALL_LENGTH_CM:
+        return capture, {
+            "accepted": False,
+            "reason": "a parede deve manter pelo menos {:.0f}cm de comprimento".format(
+                MIN_EDITABLE_WALL_LENGTH_CM
+            ),
+        }
+
+    source_ids = _source_ids_for_display_wall(display_wall)
+    trial = copy.deepcopy(capture)
+    changed_wall_ids = []
+    for raw in trial.get("walls") or []:
+        raw_ids = set(_raw_wall_ids(raw))
+        if not raw_ids & source_ids:
+            continue
+        raw_start = _xy_point(raw.get("start_cm") or raw.get("start"), "inicio da parede fonte")
+        raw_end = _xy_point(raw.get("end_cm") or raw.get("end"), "fim da parede fonte")
+        start_t, _unused = _line_projection(raw_start, old_start, old_end)
+        end_t, _unused = _line_projection(raw_end, old_start, old_end)
+        raw["start_cm"] = _point_on_line(new_start, new_end, start_t)
+        raw["end_cm"] = _point_on_line(new_start, new_end, end_t)
+        raw.pop("start", None)
+        raw.pop("end", None)
+        changed_wall_ids.extend(_raw_wall_ids(raw))
+
+    # A porta/janela permanece na mesma posição relativa ao eixo. Assim,
+    # mover ou redimensionar a Wall nunca deixa uma abertura órfã na posição
+    # antiga; o solver recebe sempre paredes + aberturas consistentes.
+    moved_opening_ids = []
+    for opening in trial.get("openings") or []:
+        if str(opening.get("host_wall_id") or "") not in source_ids:
+            continue
+        center = _xy_point(opening.get("center_cm"), "centro da abertura")
+        center_t, _unused = _line_projection(center, old_start, old_end)
+        opening["center_cm"] = _point_on_line(new_start, new_end, center_t)
+        moved_opening_ids.append(str(opening.get("element_id") or ""))
+
+    return trial, {
+        "accepted": True,
+        "wall_id": display_wall.get("id"),
+        "source_wall_ids": sorted(source_ids),
+        "changed_wall_ids": sorted(set(changed_wall_ids)),
+        "affected_wall_ids": _affected_wall_ids(trial, source_ids),
+        "moved_opening_ids": [value for value in moved_opening_ids if value],
+        "old_start_cm": list(old_start),
+        "old_end_cm": list(old_end),
+        "start_cm": list(new_start),
+        "end_cm": list(new_end),
+        "length_cm": round(new_length, 3),
+        "recalculation_scope": "nivel_e_faixa_da_parede",
+        "solver_group_keys": _group_keys_for_source_ids(trial, source_ids),
+        "processed_source_wall_ids": _group_source_ids(
+            trial, _group_keys_for_source_ids(trial, source_ids)
+        ),
+    }
+
+
+def move_capture_opening(capture, opening_id, center_cm):
+    """Move uma abertura ao longo de sua parede, aceitando toda posição válida.
+
+    Diferente do ajuste automático, uma edição explícita não exige melhorar a
+    pontuação do solver: ela só precisa permanecer dentro da Wall hospedeira.
+    O resultado pode ser não modular, mas será devolvido com o diagnóstico
+    correspondente em vez de a abertura ser ignorada ou revertida em silêncio.
+    """
+    opening_id = str(opening_id or "")
+    source_opening = next(
+        (opening for opening in capture.get("openings") or []
+         if str(opening.get("element_id") or "") == opening_id), None
+    )
+    if source_opening is None:
+        return capture, {"accepted": False, "reason": "abertura nao encontrada"}
+    axis = _opening_wall_axis(capture, source_opening)
+    if axis is None:
+        return capture, {"accepted": False, "reason": "parede hospedeira nao identificada"}
+    requested = _xy_point(center_cm, "centro da abertura")
+    current = _xy_point(source_opening.get("center_cm"), "centro atual da abertura")
+    delta_cm = ((requested[0] - current[0]) * axis["x_dir"] +
+                (requested[1] - current[1]) * axis["y_dir"])
+    new_t_cm = axis["opening_t_cm"] + delta_cm
+    half_width_cm = float(source_opening.get("width_cm") or 0.0) / 2.0
+    if new_t_cm - half_width_cm < -1e-6 or new_t_cm + half_width_cm > axis["length_cm"] + 1e-6:
+        return capture, {
+            "accepted": False,
+            "reason": "a abertura deve permanecer inteiramente dentro da parede hospedeira",
+        }
+    trial = copy.deepcopy(capture)
+    opening = next(item for item in trial.get("openings") or []
+                   if str(item.get("element_id") or "") == opening_id)
+    opening["center_cm"] = [
+        round(current[0] + axis["x_dir"] * delta_cm, 6),
+        round(current[1] + axis["y_dir"] * delta_cm, 6),
+    ]
+    return trial, {
+        "accepted": True,
+        "opening_id": opening_id,
+        "wall_id": axis["wall_id"],
+        "delta_cm": round(delta_cm, 3),
+        "center_cm": opening["center_cm"],
+        "affected_wall_ids": _affected_wall_ids(trial, {str(axis["wall_id"])}),
+        "recalculation_scope": "nivel_e_faixa_da_parede",
+        "solver_group_keys": _group_keys_for_source_ids(trial, {str(axis["wall_id"])}),
+        "processed_source_wall_ids": _group_source_ids(
+            trial, _group_keys_for_source_ids(trial, {str(axis["wall_id"])})
+        ),
+    }
 
 
 def _opening_wall_axis(capture, opening):

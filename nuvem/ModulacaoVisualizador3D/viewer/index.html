@@ -193,9 +193,11 @@ let currentBlockCandidates = [];
 let currentCatalog = {};
 let currentModelId = null;
 let selectedOpeningId = null;
+let selectedWallId = null;
 let committedViewData = null;
 let activePreviewAction = null;
 let lastBounds = null;
+let editSession = null;
 
 function clearGroup(group) {
   while (group.children.length) {
@@ -411,10 +413,11 @@ function addWallBox(wall) {
   const height = wall.height_cm || WALL_HEIGHT_CM;
   const baseZ = wall.base_z_cm || 0;
   const closes = wall.modulation && wall.modulation.closes;
-  const isError = wall.single_line || !closes;
+  const solverStatus = wall.modulation_status || {};
+  const isError = wall.single_line || !closes || solverStatus.ok === false;
   const blocks = wall.modulation && wall.modulation.blocks;
   const materialInfo = {
-    color: wall.single_line ? 0xe53935 : (closes ? 0x4caf50 : 0xe53935),
+    color: wall.single_line || solverStatus.ok === false ? 0xe53935 : (closes ? 0x4caf50 : 0xe53935),
     opacity: blocks ? 0.18 : 0.85,
     isError,
   };
@@ -568,6 +571,7 @@ function clearSelectionHighlight() {
   selectedObject = null;
   selectedOriginalColor = null;
   selectedOpeningId = null;
+  selectedWallId = null;
   hideOpeningContextMenu();
   document.getElementById('btn-auto-adjust').disabled = !currentModelId;
   requestRender();
@@ -584,6 +588,8 @@ function selectObject(obj, instanceId = null) {
   if (obj.userData.kind === 'wall') {
     const w = obj.userData.wall;
     const mod = w.modulation || {};
+    const solverStatus = w.modulation_status || {};
+    selectedWallId = String(w.id || '');
     panel.innerHTML = `<div class="sel-title">Parede ${w.id}</div>`
       + `<div class="sel-row">Layer: ${w.layer}</div>`
       + `<div class="sel-row">Comprimento: ${w.length_cm.toFixed(1)}cm</div>`
@@ -593,7 +599,9 @@ function selectObject(obj, instanceId = null) {
       + `<div class="sel-row">Junções: ${(w.junctions || []).map(j => j || '-').join(' / ')}</div>`
       + `<div class="sel-row">Modulação: ${mod.closes ? 'fecha' : 'não fecha'}`
       + `${mod.blocks ? ' (' + mod.blocks.join('+') + 'cm)' : ''}</div>`
-      + (!mod.closes ? `<div class="sel-row">Conflito: comprimento ou encontro exige revisão pelo solver.</div>` : '');
+      + (solverStatus.reason ? `<div class="sel-row">Diagnóstico: ${solverStatus.reason}</div>` : '')
+      + (!mod.closes ? `<div class="sel-row">Conflito: comprimento ou encontro exige revisão pelo solver.</div>` : '')
+      + (currentModelId ? `<div class="sel-row" style="margin-top:8px"><button type="button" data-wall-edit="move" class="secondary">Arrastar parede</button> <button type="button" data-wall-edit="start" class="secondary">Arrastar início</button> <button type="button" data-wall-edit="end" class="secondary">Arrastar fim</button></div>` : '');
   } else if (obj.userData.kind === 'opening') {
     const op = obj.userData.opening;
     selectedOpeningId = String(op.element_id || '');
@@ -607,6 +615,7 @@ function selectObject(obj, instanceId = null) {
       + `<div class="sel-row" style="margin-top:8px">`
       + `<button type="button" data-opening-shift="-1" class="secondary">Mover -1cm</button> `
       + `<button type="button" data-opening-shift="1" class="secondary">Mover +1cm</button>`
+      + (currentModelId ? ` <button type="button" data-opening-edit="move" class="secondary">Arrastar abertura</button>` : '')
       + `</div>`;
   } else if (obj.userData.kind === 'block-instances') {
     const entry = obj.userData.instances[instanceId];
@@ -660,6 +669,109 @@ function pickObjectAt(clientX, clientY) {
   }
   return null;
 }
+
+function worldPointAt(clientX, clientY) {
+  const rect = canvasEl.getBoundingClientRect();
+  mouseNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  mouseNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouseNdc, camera);
+  const point = new THREE.Vector3();
+  return raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), point) ? point : null;
+}
+
+function beginWallEdit(mode) {
+  const wall = currentWalls.find(item => String(item.id || '') === selectedWallId);
+  if (!wall || !currentModelId) return;
+  editSession = { kind: 'wall', mode, wall, pointerStart: null };
+  setStatus(`Arraste no modelo para ${mode === 'move' ? 'mover a parede' : (mode === 'start' ? 'reposicionar o início' : 'reposicionar o fim')}. A modulação será recalculada ao soltar.`);
+}
+
+function beginOpeningEdit() {
+  const opening = currentOpenings.find(item => String(item.element_id || '') === selectedOpeningId);
+  if (!opening || !currentModelId) return;
+  editSession = { kind: 'opening', opening, pointerStart: null };
+  setStatus('Arraste no modelo para mover a abertura ao longo da parede. A modulação será recalculada ao soltar.');
+}
+
+async function commitInteractiveEdit(session, point) {
+  if (!currentModelId || !point) return;
+  let endpoint;
+  let body;
+  if (session.kind === 'wall') {
+    const [x0, y0] = session.wall.start;
+    const [x1, y1] = session.wall.end;
+    const dx = point.x - session.pointerStart.x;
+    const dy = point.y - session.pointerStart.y;
+    const start = session.mode === 'move' ? [x0 + dx, y0 + dy] : (session.mode === 'start' ? [point.x, point.y] : [x0, y0]);
+    const end = session.mode === 'move' ? [x1 + dx, y1 + dy] : (session.mode === 'end' ? [point.x, point.y] : [x1, y1]);
+    endpoint = '/api/edit-wall';
+    body = { model_id: currentModelId, wall_id: session.wall.id, start_cm: start, end_cm: end };
+  } else {
+    const opening = session.opening;
+    const axis = opening.axis_cm || [Math.cos(opening.angle_rad || 0), Math.sin(opening.angle_rad || 0)];
+    const delta = (point.x - session.pointerStart.x) * axis[0] + (point.y - session.pointerStart.y) * axis[1];
+    endpoint = '/api/move-opening';
+    body = {
+      model_id: currentModelId,
+      opening_id: opening.element_id,
+      center_cm: [opening.center_cm[0] + axis[0] * delta, opening.center_cm[1] + axis[1] * delta],
+    };
+  }
+  setStatus('Recalculando paredes, encontros e blocos afetados...');
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setStatus((data.edit && data.edit.reason) || data.error || 'A edição foi rejeitada.', true);
+      return;
+    }
+    renderModulationData(data, { edit: data.edit });
+    const edit = data.edit || {};
+    const affected = (edit.affected_wall_ids || []).length;
+    setStatus(`Atualização concluída${affected ? `: ${affected} parede(s) conectada(s) reavaliada(s).` : '.'}`);
+  } catch (error) {
+    setStatus('Falha ao atualizar a geometria: ' + error, true);
+  }
+}
+
+canvasEl.addEventListener('pointerdown', event => {
+  if (!editSession || event.button !== 0) return;
+  const point = worldPointAt(event.clientX, event.clientY);
+  if (!point) return;
+  event.preventDefault();
+  event.stopPropagation();
+  editSession.pointerStart = point;
+  controls.enabled = false;
+  canvasEl.setPointerCapture(event.pointerId);
+});
+
+canvasEl.addEventListener('pointermove', event => {
+  if (!editSession || !editSession.pointerStart) return;
+  const point = worldPointAt(event.clientX, event.clientY);
+  if (!point) return;
+  const distance = Math.hypot(point.x - editSession.pointerStart.x, point.y - editSession.pointerStart.y);
+  setStatus(`Prévia de edição: ${distance.toFixed(1)}cm. Solte para recalcular a modulação.`);
+});
+
+canvasEl.addEventListener('pointerup', event => {
+  if (!editSession || !editSession.pointerStart) return;
+  const point = worldPointAt(event.clientX, event.clientY);
+  const session = editSession;
+  editSession = null;
+  controls.enabled = true;
+  if (canvasEl.hasPointerCapture(event.pointerId)) canvasEl.releasePointerCapture(event.pointerId);
+  commitInteractiveEdit(session, point);
+});
+
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && editSession) {
+    editSession = null;
+    controls.enabled = true;
+    setStatus('Edição cancelada.');
+  }
+});
 
 canvasEl.addEventListener('click', (e) => {
   if (mouseDownPos) {
@@ -838,9 +950,12 @@ function renderModulationData(data, options = {}) {
   const solver = data.block_diagnostics || {};
   let summaryText;
   if (data.source_mode === 'revit_walls' && solver.status === 'ok') {
-    const conflicts = (solver.collision_count || 0) + (solver.non_modular_count || 0) + (solver.jamb_exception_count || 0);
+    const conflicts = solver.partial_recalculation
+      ? (solver.wall_statuses || []).filter(status => status.ok === false).length
+      : (solver.collision_count || 0) + (solver.non_modular_count || 0) + (solver.jamb_exception_count || 0);
     summaryText = `${currentWalls.length} parede(s) contínua(s) · ${solver.candidate_count || 0} bloco(s) resolvido(s).`;
     summaryText += conflicts ? `\n${conflicts} conflito(s) do solver exigem ajuste.` : '\nModulação validada sem conflitos pelo solver.';
+    if (solver.partial_recalculation) summaryText += '\nRecalculada somente a faixa de nível/base alterada.';
   } else {
     summaryText = `${currentWalls.length} parede(s) — ${closesCount} fecham em blocos, ${currentWalls.length - closesCount} precisam de ajuste.`;
   }
@@ -853,6 +968,10 @@ function renderModulationData(data, options = {}) {
     const wallAdjustments = options.adjustment.actions.filter(a => a.status === 'adjusted').length;
     if (openingAdjustments) summaryText += `\n${openingAdjustments} abertura(s) ajustada(s) e revalidada(s).`;
     else if (wallAdjustments) summaryText += `\n${wallAdjustments} parede(s) corrigida(s) no preview.`;
+  }
+  if (options.edit) {
+    const affected = (options.edit.affected_wall_ids || []).length;
+    summaryText += `\nEdição dinâmica aplicada${affected ? ` · ${affected} parede(s) conectada(s) afetada(s)` : ''}.`;
   }
   document.getElementById('summary').textContent = summaryText;
 
@@ -1041,6 +1160,16 @@ document.getElementById('btn-layers').addEventListener('click', loadLayers);
 document.getElementById('btn-load').addEventListener('click', loadModulation);
 document.getElementById('btn-auto-adjust').addEventListener('click', () => adjustSelectedOpening('auto'));
 document.getElementById('selection-panel').addEventListener('click', (event) => {
+  const wallButton = event.target.closest('[data-wall-edit]');
+  if (wallButton) {
+    beginWallEdit(wallButton.dataset.wallEdit);
+    return;
+  }
+  const openingEditButton = event.target.closest('[data-opening-edit]');
+  if (openingEditButton) {
+    beginOpeningEdit();
+    return;
+  }
   const button = event.target.closest('[data-opening-shift]');
   if (button) adjustSelectedOpening('manual', parseFloat(button.dataset.openingShift));
 });

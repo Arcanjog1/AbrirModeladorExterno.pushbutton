@@ -8,11 +8,63 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wall_capture import (
     walls_from_capture, enrich_openings_for_view, adjust_capture_opening,
     adjust_capture_openings,
-    solve_capture_block_candidates,
+    solve_capture_block_candidates, edit_capture_wall, move_capture_opening,
 )
 
 
 class TestWallsFromCapture(unittest.TestCase):
+    def test_edita_eixo_continuo_e_move_abertura_hospedada_junto(self):
+        capture = {
+            "walls": [
+                {"element_id": "101", "start_cm": [0, 0], "end_cm": [100, 0],
+                 "thickness_cm": 14, "height_cm": 280, "base_z_cm": 0},
+                {"element_id": "102", "start_cm": [100, 0], "end_cm": [200, 0],
+                 "thickness_cm": 14, "height_cm": 280, "base_z_cm": 0},
+            ],
+            "openings": [
+                {"element_id": "201", "host_wall_id": "101", "center_cm": [50, 0],
+                 "width_cm": 40, "sill_cm": 0, "head_cm": 210},
+            ],
+        }
+
+        edited, action = edit_capture_wall(capture, "101+102", [20, 10], [320, 10])
+
+        self.assertTrue(action["accepted"])
+        self.assertEqual(action["source_wall_ids"], ["101", "102"])
+        self.assertAlmostEqual(edited["walls"][0]["start_cm"][0], 20.0)
+        self.assertAlmostEqual(edited["walls"][0]["end_cm"][0], 170.0)
+        self.assertAlmostEqual(edited["walls"][1]["end_cm"][0], 320.0)
+        self.assertEqual(edited["openings"][0]["center_cm"], [95.0, 10.0])
+        # A captura de origem permanece intacta: preview/edição pode ser
+        # descartado sem corromper a geometria carregada.
+        self.assertEqual(capture["walls"][0]["start_cm"], [0, 0])
+        self.assertEqual(capture["openings"][0]["center_cm"], [50, 0])
+
+    def test_edicao_rejeita_parede_sem_comprimento(self):
+        capture = {
+            "walls": [{"element_id": "101", "start_cm": [0, 0], "end_cm": [100, 0],
+                       "thickness_cm": 14, "height_cm": 280, "base_z_cm": 0}],
+        }
+
+        _edited, action = edit_capture_wall(capture, "101", [10, 10], [10, 10])
+
+        self.assertFalse(action["accepted"])
+        self.assertIn("comprimento", action["reason"])
+
+    def test_movimento_explicito_da_abertura_nao_exige_melhoria_do_solver(self):
+        capture = {
+            "walls": [{"element_id": "101", "start_cm": [0, 0], "end_cm": [200, 0],
+                       "thickness_cm": 14, "height_cm": 280, "base_z_cm": 0}],
+            "openings": [{"element_id": "201", "host_wall_id": "101", "center_cm": [100, 0],
+                          "width_cm": 80, "sill_cm": 0, "head_cm": 210}],
+        }
+
+        edited, action = move_capture_opening(capture, "201", [130, 40])
+
+        self.assertTrue(action["accepted"])
+        self.assertEqual(edited["openings"][0]["center_cm"], [130.0, 0.0])
+        self.assertEqual(capture["openings"][0]["center_cm"], [100, 0])
+
     def test_paredes_em_sequencia_formam_uma_parede_continua(self):
         capture = {
             "walls": [
@@ -199,8 +251,23 @@ class TestWallsFromCapture(unittest.TestCase):
         self.assertEqual(diagnostics["z_reference_cm"], 300.0)
         self.assertEqual(diagnostics["blocks_below_reference_count"], 0)
         self.assertEqual(diagnostics["lintel_missing_count"], 0)
+        self.assertTrue(diagnostics["wall_statuses"])
+        self.assertEqual(diagnostics["wall_statuses"][0]["wall_id"], "101")
+        self.assertIn("reason", diagnostics["wall_statuses"][0])
         self.assertTrue(all(candidate["color_rgb"] == [10, 20, 30] for candidate in candidates))
         self.assertTrue(any(candidate["cells_local_cm"] for candidate in candidates))
+
+        other_level_capture = dict(capture)
+        other_level_capture["walls"] = list(capture["walls"]) + [{
+            "element_id": "102", "start": [0, 100], "end": [119, 100],
+            "thickness_cm": 14, "height_cm": 280, "base_z_cm": 600, "level": "Nivel 3",
+        }]
+        partial_candidates, partial_diagnostics = solve_capture_block_candidates(
+            other_level_capture, group_keys=[["Nivel 3", 600]]
+        )
+        self.assertTrue(partial_candidates)
+        self.assertTrue(all(candidate["solver_group_key"] == ["Nivel 3", 600] for candidate in partial_candidates))
+        self.assertEqual(partial_diagnostics["processed_group_keys"], [["Nivel 3", 600]])
 
         edge_capture = dict(capture)
         edge_capture["openings"] = [dict(capture["openings"][0], center_cm=[19.5, 0])]

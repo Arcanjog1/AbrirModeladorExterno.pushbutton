@@ -37,6 +37,10 @@ Rotas:
         ganha um "wall_id" (aproximado - ver associate_entities_with_walls
         em wall_pairing.py) indicando a parede final a que ela parece
         pertencer.
+    POST /api/edit-wall             -> edita início/fim de uma Wall contínua
+        da captura Revit e recalcula blocos/encontros dependentes.
+    POST /api/move-opening          -> move uma abertura hospedada ao longo
+        da Wall e reaplica a mesma modulação física.
 """
 
 import json
@@ -57,6 +61,7 @@ from wall_capture import (
     walls_from_capture, enrich_openings_for_view,
     openings_for_capture_view,
     solve_capture_block_candidates, adjust_capture_opening, adjust_capture_openings,
+    edit_capture_wall, move_capture_opening,
 )
 from modulation_preview import preview_walls
 from file_dialog import pick_dwg_file, pick_json_file, DialogError
@@ -68,6 +73,7 @@ VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 _LOAD_CACHE = OrderedDict()
 _SEGMENT_CACHE = OrderedDict()
 _CAPTURE_MODELS = OrderedDict()
+_CAPTURE_SOLUTIONS = OrderedDict()
 _CACHE_LIMIT = 4
 
 _STATIC_CONTENT_TYPES = {
@@ -101,9 +107,14 @@ def _read_dxf_segments_cached(path, layers=None, unit_scale_to_cm=None):
     return [dict(segment) for segment in cached]
 
 
-def _store_capture_model(cache_key, capture):
+def _store_capture_model(cache_key, capture, candidates=None, diagnostics=None):
     model_id = hashlib.sha1(repr(cache_key).encode("utf-8")).hexdigest()[:16]
     _remember(_CAPTURE_MODELS, model_id, capture)
+    if candidates is not None and diagnostics is not None:
+        _remember(_CAPTURE_SOLUTIONS, model_id, {
+            "candidates": candidates,
+            "diagnostics": diagnostics,
+        })
     return model_id
 
 
@@ -129,6 +140,24 @@ def _capture_view_payload(capture, candidates=None, block_diagnostics=None):
     if candidates is None or block_diagnostics is None:
         candidates, block_diagnostics = solve_capture_block_candidates(capture)
     walls_with_preview = preview_walls(walls)
+    statuses_by_source_id = {}
+    for status in (block_diagnostics.get("wall_statuses") or []):
+        for source_id in status.get("source_wall_ids") or []:
+            statuses_by_source_id[str(source_id)] = status
+    for wall in walls_with_preview:
+        source_ids = wall.get("source_wall_ids") or [wall.get("element_id"), wall.get("id")]
+        statuses = [statuses_by_source_id.get(str(source_id)) for source_id in source_ids]
+        statuses = [status for status in statuses if status is not None]
+        if statuses:
+            wall["modulation_status"] = next(
+                (status for status in statuses if not status.get("ok")), statuses[0]
+            )
+        elif block_diagnostics.get("status") == "ok":
+            wall["modulation_status"] = {
+                "ok": False,
+                "code": "NOT_PROCESSED",
+                "reason": "o solver nao devolveu diagnostico para esta parede",
+            }
     associate_entities_with_walls(segments, walls)
     openings_for_view = enrich_openings_for_view(walls, openings)
     validation = validate_walls(walls, wall_diagnostics)
@@ -226,6 +255,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_entities()
         if parsed.path == "/api/adjust-opening":
             return self._handle_adjust_opening()
+        if parsed.path == "/api/edit-wall":
+            return self._handle_edit_wall()
+        if parsed.path == "/api/move-opening":
+            return self._handle_move_opening()
 
         return self._send_json(404, {"error": "rota desconhecida"})
 
@@ -343,7 +376,9 @@ class Handler(BaseHTTPRequestHandler):
                         "cache_hit": False,
                     },
                 }
-                payload["model_id"] = _store_capture_model(cache_key, capture)
+                payload["model_id"] = _store_capture_model(
+                    cache_key, capture, block_candidates, block_diagnostics
+                )
                 _remember(_LOAD_CACHE, cache_key, payload)
                 return self._send_json(200, payload)
             except Exception as exc:
@@ -422,6 +457,9 @@ class Handler(BaseHTTPRequestHandler):
                 if preview_only:
                     return self._send_json(200, payload)
                 _remember(_CAPTURE_MODELS, model_id, adjusted)
+                _remember(_CAPTURE_SOLUTIONS, model_id, {
+                    "candidates": candidates, "diagnostics": diagnostics,
+                })
                 for cache_key, cached_payload in list(_LOAD_CACHE.items()):
                     if cached_payload.get("model_id") == model_id:
                         cached_adjusted = dict(payload)
@@ -433,6 +471,104 @@ class Handler(BaseHTTPRequestHandler):
                         break
                 return self._send_json(200, payload)
             return self._send_json(409, payload)
+        except Exception as exc:
+            traceback.print_exc()
+            return self._send_json(500, {"error": str(exc)})
+
+    def _commit_capture_edit(self, model_id, capture, action, started_at):
+        """Recalcula a mesma modulação completa usada na carga inicial.
+
+        O motor já separa o cálculo por nível/faixa de base. O metadado de
+        escopo devolvido na ação mostra quais Walls conectadas foram afetadas;
+        assim a UI atualiza a região dependente sem inventar uma segunda
+        regra simplificada para o arraste.
+        """
+        groups = action.get("solver_group_keys") or []
+        previous_solution = _CAPTURE_SOLUTIONS.get(model_id)
+        if previous_solution is not None and groups:
+            changed_candidates, changed_diagnostics = solve_capture_block_candidates(
+                capture, group_keys=groups
+            )
+            group_tokens = set((str(key[0]), float(key[1])) for key in groups)
+
+            def belongs_to_changed_group(candidate):
+                key = candidate.get("solver_group_key") or []
+                return len(key) >= 2 and (str(key[0]), float(key[1])) in group_tokens
+
+            candidates = [
+                candidate for candidate in previous_solution.get("candidates") or []
+                if not belongs_to_changed_group(candidate)
+            ] + changed_candidates
+            processed_ids = set(str(value) for value in (action.get("processed_source_wall_ids") or []))
+            statuses = [
+                status for status in (previous_solution.get("diagnostics") or {}).get("wall_statuses") or []
+                if not (set(str(value) for value in (status.get("source_wall_ids") or [])) & processed_ids)
+            ] + list(changed_diagnostics.get("wall_statuses") or [])
+            diagnostics = dict(previous_solution.get("diagnostics") or {})
+            diagnostics.update({
+                "status": changed_diagnostics.get("status", "ok"),
+                "candidate_count": len(candidates),
+                "wall_statuses": statuses,
+                "processed_group_keys": changed_diagnostics.get("processed_group_keys") or groups,
+                "partial_recalculation": True,
+            })
+        else:
+            candidates, diagnostics = solve_capture_block_candidates(capture)
+        payload = _capture_view_payload(capture, candidates, diagnostics)
+        payload["model_id"] = model_id
+        payload["edit"] = action
+        payload["performance_ms"] = {
+            "total": round((time.perf_counter() - started_at) * 1000.0, 1),
+            "cache_hit": False,
+        }
+        _remember(_CAPTURE_MODELS, model_id, capture)
+        _remember(_CAPTURE_SOLUTIONS, model_id, {
+            "candidates": candidates, "diagnostics": diagnostics,
+        })
+        for cache_key, cached_payload in list(_LOAD_CACHE.items()):
+            if cached_payload.get("model_id") == model_id:
+                _remember(_LOAD_CACHE, cache_key, dict(payload))
+                break
+        return self._send_json(200, payload)
+
+    def _handle_edit_wall(self):
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        model_id = str(body.get("model_id") or "")
+        capture = _CAPTURE_MODELS.get(model_id)
+        if capture is None:
+            return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        started_at = time.perf_counter()
+        try:
+            edited, action = edit_capture_wall(
+                capture, body.get("wall_id"), body.get("start_cm"), body.get("end_cm")
+            )
+            if not action.get("accepted"):
+                return self._send_json(409, {"edit": action})
+            return self._commit_capture_edit(model_id, edited, action, started_at)
+        except Exception as exc:
+            traceback.print_exc()
+            return self._send_json(500, {"error": str(exc)})
+
+    def _handle_move_opening(self):
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        model_id = str(body.get("model_id") or "")
+        capture = _CAPTURE_MODELS.get(model_id)
+        if capture is None:
+            return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        started_at = time.perf_counter()
+        try:
+            edited, action = move_capture_opening(
+                capture, body.get("opening_id"), body.get("center_cm")
+            )
+            if not action.get("accepted"):
+                return self._send_json(409, {"edit": action})
+            return self._commit_capture_edit(model_id, edited, action, started_at)
         except Exception as exc:
             traceback.print_exc()
             return self._send_json(500, {"error": str(exc)})
