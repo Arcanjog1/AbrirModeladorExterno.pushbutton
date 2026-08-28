@@ -55,6 +55,7 @@ from dxf_reader import read_dxf_segments, list_layers_with_counts
 from wall_pairing import pair_walls_from_segments, associate_entities_with_walls
 from wall_capture import (
     walls_from_capture, enrich_openings_for_view,
+    openings_for_capture_view,
     solve_capture_block_candidates, adjust_capture_opening, adjust_capture_openings,
 )
 from modulation_preview import preview_walls
@@ -106,9 +107,24 @@ def _store_capture_model(cache_key, capture):
     return model_id
 
 
+def _append_block_warnings(warnings, block_diagnostics):
+    if block_diagnostics.get("status") == "error":
+        warnings.append("Solver de blocos: {}".format(block_diagnostics.get("reason")))
+    if block_diagnostics.get("invalid_b34_count"):
+        warnings.append("Bloco B34 encontrado fora de amarracao; a solucao foi reprovada.")
+    if block_diagnostics.get("lintel_missing_count"):
+        warnings.append(
+            "{} abertura(s) sem modulacao valida acima da verga.".format(
+                block_diagnostics["lintel_missing_count"]
+            )
+        )
+    if block_diagnostics.get("blocks_below_reference_count"):
+        warnings.append("Ha blocos abaixo da cota de referencia da planta.")
+
+
 def _capture_view_payload(capture, candidates=None, block_diagnostics=None):
     segments = [dict(segment) for segment in (capture.get("segments") or [])]
-    openings = capture.get("openings") or []
+    openings = openings_for_capture_view(capture)
     walls, wall_diagnostics = walls_from_capture(capture)
     if candidates is None or block_diagnostics is None:
         candidates, block_diagnostics = solve_capture_block_candidates(capture)
@@ -123,8 +139,7 @@ def _capture_view_payload(capture, candidates=None, block_diagnostics=None):
                 wall_diagnostics["skipped_walls"]
             )
         )
-    if block_diagnostics.get("status") == "error":
-        warnings.append("Solver de blocos: {}".format(block_diagnostics.get("reason")))
+    _append_block_warnings(warnings, block_diagnostics)
     return {
         "is_capture": True,
         "source_mode": "revit_walls",
@@ -248,7 +263,7 @@ class Handler(BaseHTTPRequestHandler):
                     capture = json.load(f)
 
                 segments = capture.get("segments", [])
-                openings = capture.get("openings", [])
+                openings = openings_for_capture_view(capture)
                 catalog = capture.get("catalog", {})
                 setup = capture.get("setup", {})
                 wall_height_m = capture.get("wall_height_m") or 2.8
@@ -286,6 +301,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     block_candidates, block_diagnostics = [], {"status": "skipped", "reason": "captura por segmentos"}
                 walls_with_preview = preview_walls(walls)
+                _append_block_warnings(warnings, block_diagnostics)
 
                 single_line_count = sum(1 for w in walls_with_preview if w["single_line"])
                 if single_line_count:

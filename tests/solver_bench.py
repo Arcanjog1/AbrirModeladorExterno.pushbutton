@@ -27,7 +27,7 @@ Este arquivo serve a DOIS propositos, e o segundo e' o mais importante:
 
    VALOR DE REFERENCIA (cenarios padrao, apos a otimizacao de 2026-08-27):
 
-       9413aad03627387d3a3ca548ab6705ee76bf36bf027ca2debb54f6dc5b28e88d
+       30adafcc034f7be64858ce8421a46b60a6ba5e68c3ec29d8e688ceba29c27bcc
 
    Esse numero SO' vale para os `SCENARIOS` definidos aqui. Mudar a grade, as
    aberturas ou o numero de fiadas muda a assinatura sem que nada esteja
@@ -64,7 +64,10 @@ m = load_script.load()
 F = m.FEET_PER_METER
 
 # Assinatura esperada dos SCENARIOS abaixo - ver o docstring do modulo.
-REFERENCE_FINGERPRINT = "9413aad03627387d3a3ca548ab6705ee76bf36bf027ca2debb54f6dc5b28e88d"
+# Atualizado em 2026-08-28: B34 passou a ser exclusivo de amarracoes,
+# fallbacks com varias pecas pequenas foram removidos e o preenchimento
+# comum passou a escolher a melhor combinacao por pontuacao tecnica.
+REFERENCE_FINGERPRINT = "30adafcc034f7be64858ce8421a46b60a6ba5e68c3ec29d8e688ceba29c27bcc"
 
 # Pe-direito tipico do projeto: 3,00m / 20cm por fiada = 15 fiadas fisicas.
 NUM_COURSES = 15

@@ -25,6 +25,35 @@ FIRST_COURSE_Z_OFFSET_CM = 1.0
 OPENING_COURSE_BAND_TOLERANCE_CM = 0.5
 
 
+def capture_z_reference_cm(capture):
+    """Cota da planta usada como Z=0 no visualizador externo."""
+    bases = [
+        float(raw.get("base_z_cm") or 0.0)
+        for raw in (capture.get("walls") or [])
+        if (raw.get("start_cm") or raw.get("start")) and (raw.get("end_cm") or raw.get("end"))
+    ]
+    return min(bases) if bases else 0.0
+
+
+def openings_for_capture_view(capture):
+    """Copia as aberturas com cotas relativas a planta baixa."""
+    reference_cm = capture_z_reference_cm(capture)
+    result = []
+    for source in capture.get("openings") or []:
+        opening = copy.deepcopy(source)
+        sill = float(source.get("sill_cm") or 0.0) - reference_cm
+        head = float(source.get("head_cm") or (float(source.get("sill_cm") or 0.0) + 220.0)) - reference_cm
+        opening["sill_cm"] = round(sill, 3)
+        opening["head_cm"] = round(max(sill, head), 3)
+        opening["height_cm"] = round(max(0.0, head - sill), 3)
+        if source.get("level_elevation_cm") is not None:
+            opening["level_elevation_cm"] = round(
+                float(source.get("level_elevation_cm")) - reference_cm, 3
+            )
+        result.append(opening)
+    return result
+
+
 def _capture_graph(capture):
     return _capture_graph_for_raw(
         capture.get("walls") or [], capture.get("openings") or []
@@ -217,6 +246,7 @@ def walls_from_capture(capture):
     walls = []
     skipped = 0
     graph_wall_count = 0
+    z_reference_cm = capture_z_reference_cm(capture)
     for _key, group_raw_walls, group_openings in _capture_wall_groups(capture):
         graph_tuples, raw_by_tuple, openings_per_wall, junctions_by_index, _nodes, _end_to_node, group_skipped = _capture_graph_for_raw(
             group_raw_walls, group_openings
@@ -243,7 +273,7 @@ def walls_from_capture(capture):
                     "end": point_to_cm(p1),
                     "length_cm": round(p0.DistanceTo(p1) * FT_TO_CM, 2),
                     "height_cm": round(seg_height_ft * FT_TO_CM, 2),
-                    "base_z_cm": round((base_z_abs_ft + seg_base_offset_ft) * FT_TO_CM, 2),
+                    "base_z_cm": round((base_z_abs_ft + seg_base_offset_ft) * FT_TO_CM - z_reference_cm, 2),
                     "origin": "abertura" if seg_origin == "abertura" else "revit_wall",
                 })
 
@@ -259,9 +289,12 @@ def walls_from_capture(capture):
                 "thickness_cm": round(thickness_ft * FT_TO_CM, 2),
                 "length_cm": round(p0.DistanceTo(p1) * FT_TO_CM, 2),
                 "height_cm": round(raw_height_cm, 2),
-                "base_z_cm": round(base_z_abs_ft * FT_TO_CM, 2),
+                "base_z_cm": round(base_z_abs_ft * FT_TO_CM - z_reference_cm, 2),
                 "level": raw.get("level") or capture.get("level", ""),
-                "level_elevation_cm": raw.get("level_elevation_cm"),
+                "level_elevation_cm": (
+                    round(float(raw.get("level_elevation_cm")) - z_reference_cm, 2)
+                    if raw.get("level_elevation_cm") is not None else None
+                ),
                 "base_offset_cm": raw.get("base_offset_cm"),
                 "layer": raw.get("layer") or "Walls Revit",
                 "single_line": False,
@@ -279,6 +312,8 @@ def walls_from_capture(capture):
             len(wall.get("cutout_segments") or []) for wall in walls
         ),
         "continuous_wall_count": len(walls),
+        "z_reference_cm": round(z_reference_cm, 3),
+        "walls_below_reference_count": sum(1 for wall in walls if wall.get("base_z_cm", 0.0) < -1e-6),
         "skipped_walls": skipped,
         "duplicates_removed": 0,
         "possible_bonecas": [],
@@ -326,7 +361,12 @@ def solve_capture_block_candidates(capture):
     course_step_cm = block_height_cm + BLOCK_JOINT_CM
     skipped = 0
     level_runs = []
-    counters = {"non_modular_count": 0, "collision_count": 0, "jamb_exception_count": 0}
+    counters = {
+        "non_modular_count": 0, "collision_count": 0, "jamb_exception_count": 0,
+        "intersection_failure_count": 0, "validation_failure_count": 0,
+        "door_void_violation_count": 0,
+    }
+    z_reference_cm = capture_z_reference_cm(capture)
 
     for group_key, group_raw_walls, group_openings in _capture_wall_groups(capture):
         graph_tuples, raw_by_tuple, openings_per_wall, _junctions_by_index, nodes, end_to_node, group_skipped = _capture_graph_for_raw(
@@ -372,6 +412,11 @@ def solve_capture_block_candidates(capture):
             counters["non_modular_count"] += len(run.get("non_modular") or [])
             counters["collision_count"] += len(run.get("collisions") or [])
             counters["jamb_exception_count"] += len(run.get("jamb_exceptions") or [])
+            counters["intersection_failure_count"] += len(run.get("intersection_failures") or [])
+            counters["validation_failure_count"] += sum(
+                1 for validation in (run.get("validations") or []) if not validation.get("ok")
+            )
+            counters["door_void_violation_count"] += len(run.get("door_void_violations") or [])
 
             for course_index in band["course_indices"]:
                 course_letter = "A" if course_index % 2 == 0 else "B"
@@ -407,7 +452,7 @@ def solve_capture_block_candidates(capture):
                         "wall_id": wall_id,
                         "secondary_wall_idx": secondary_idx,
                         "origin_cm": [origin.X * FT_TO_CM, origin.Y * FT_TO_CM],
-                        "z_cm": z_cm,
+                        "z_cm": z_cm - z_reference_cm,
                         "level": group_key[0],
                         "x_dir": [x_dir.X, x_dir.Y],
                         "y_dir": [y_dir.X, y_dir.Y],
@@ -420,27 +465,80 @@ def solve_capture_block_candidates(capture):
                     })
         level_runs.append({"level": group_key[0], "base_z_cm": base_z_cm, "bands": len(bands), "courses": num_courses})
 
+    compensator_codes = set(
+        code for code, entry in catalog.items() if entry.get("is_compensator")
+    )
+    invalid_b34_count = sum(
+        1 for candidate in result
+        if candidate.get("logical_code") == "B34"
+        and not any(token in str(candidate.get("placement_reason") or "")
+                    for token in ("CORNER", "INTERSECTION"))
+    )
+    lintel_missing_count = 0
+    raw_walls_by_id = {}
+    for seq, raw in enumerate(capture.get("walls") or []):
+        raw_walls_by_id[_wall_id(raw, seq + 1)] = raw
+        if raw.get("element_id") is not None:
+            raw_walls_by_id[str(raw.get("element_id"))] = raw
+    for opening in capture.get("openings") or []:
+        host_id = str(opening.get("host_wall_id") or "")
+        raw_wall = raw_walls_by_id.get(host_id)
+        if raw_wall is None:
+            continue
+        wall_base_cm = float(raw_wall.get("base_z_cm") or 0.0)
+        wall_top_cm = wall_base_cm + float(raw_wall.get("height_cm") or 0.0)
+        head_cm = float(opening.get("head_cm") or wall_base_cm)
+        if wall_top_cm - head_cm < block_height_cm - 1e-6:
+            continue
+        normalized_head_cm = head_cm - z_reference_cm
+        has_lintel_course = any(
+            candidate.get("wall_id") == _wall_id(raw_wall, 1)
+            and candidate.get("z_cm", 0.0) + 1e-6 >= normalized_head_cm
+            and candidate.get("z_cm", 0.0) + block_height_cm <= wall_top_cm - z_reference_cm + 1e-6
+            for candidate in result
+        )
+        if not has_lintel_course:
+            lintel_missing_count += 1
     diagnostics = {
         "status": "ok",
         "candidate_count": len(result),
         "non_modular_count": counters["non_modular_count"],
         "collision_count": counters["collision_count"],
         "jamb_exception_count": counters["jamb_exception_count"],
+        "intersection_failure_count": counters["intersection_failure_count"],
+        "validation_failure_count": counters["validation_failure_count"],
+        "door_void_violation_count": counters["door_void_violation_count"],
+        "invalid_b34_count": invalid_b34_count,
+        "compensator_count": sum(1 for c in result if c.get("logical_code") in compensator_codes),
+        "pastilha_count": sum(1 for c in result if c.get("logical_code") == "C04"),
+        "main_block_count": sum(1 for c in result if c.get("logical_code") == "B39"),
+        "blocks_below_reference_count": sum(1 for c in result if c.get("z_cm", 0.0) < -1e-6),
+        "lintel_missing_count": lintel_missing_count,
         "skipped_walls": skipped,
         "levels": level_runs,
         "course_step_cm": course_step_cm,
         "first_course_offset_cm": FIRST_COURSE_Z_OFFSET_CM,
+        "z_reference_cm": round(z_reference_cm, 3),
     }
     return result, diagnostics
 
 
-def _solution_quality(diagnostics):
-    """Menor e melhor; colisao nunca pode ser compensada por mais pecas."""
+def _solution_quality(diagnostics, candidates=None):
+    """Menor e melhor; validade vem antes da economia de pecas."""
     return (
         int(diagnostics.get("collision_count") or 0),
         int(diagnostics.get("non_modular_count") or 0),
+        int(diagnostics.get("intersection_failure_count") or 0),
+        int(diagnostics.get("validation_failure_count") or 0),
+        int(diagnostics.get("door_void_violation_count") or 0),
+        int(diagnostics.get("invalid_b34_count") or 0),
+        int(diagnostics.get("blocks_below_reference_count") or 0),
+        int(diagnostics.get("lintel_missing_count") or 0),
         int(diagnostics.get("jamb_exception_count") or 0),
-        -int(diagnostics.get("candidate_count") or 0),
+        int(diagnostics.get("compensator_count") or 0),
+        int(diagnostics.get("pastilha_count") or 0),
+        -int(diagnostics.get("main_block_count") or 0),
+        int(diagnostics.get("candidate_count") or 0),
     )
 
 
@@ -491,7 +589,7 @@ def adjust_capture_opening(capture, opening_id, delta_cm=None, automatic=False):
         return capture, {"accepted": False, "reason": "parede hospedeira nao identificada"}, [], {}
 
     baseline_candidates, baseline_diagnostics = solve_capture_block_candidates(capture)
-    baseline_quality = _solution_quality(baseline_diagnostics)
+    baseline_quality = _solution_quality(baseline_diagnostics, baseline_candidates)
     if baseline_diagnostics.get("status") != "ok":
         return capture, {"accepted": False, "reason": baseline_diagnostics.get("reason")}, baseline_candidates, baseline_diagnostics
 
@@ -527,12 +625,12 @@ def adjust_capture_opening(capture, opening_id, delta_cm=None, automatic=False):
         trial_candidates, trial_diagnostics = solve_capture_block_candidates(trial)
         if trial_diagnostics.get("status") != "ok":
             continue
-        quality = _solution_quality(trial_diagnostics)
+        quality = _solution_quality(trial_diagnostics, trial_candidates)
         if quality >= baseline_quality:
             continue
         if best is None or quality < best[0]:
             best = (quality, trial, trial_candidates, trial_diagnostics, candidate_delta)
-            if automatic and quality[:3] == (0, 0, 0):
+            if automatic and quality[:9] == (0, 0, 0, 0, 0, 0, 0, 0, 0):
                 break
 
     if best is None:

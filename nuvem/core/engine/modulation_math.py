@@ -34,7 +34,7 @@ except Exception:
 __all__ = [
     "OPENING_VALID_LAST_DIGITS_CM", "PIER_AT_OPENING_TOLERANCE_M",
     "PIER_AT_OPENING_TOLERANCE_FT", "OPENING_SOLVER_MAX_WIDTH_DELTA_CM",
-    "OPENING_SOLVER_MAX_AXIS_DELTA_CM", "BLOCK_LENGTHS_CM", "BLOCK_WIDTH_CM",
+    "OPENING_SOLVER_MAX_AXIS_DELTA_CM", "BLOCK_LENGTHS_CM", "BOND_ONLY_BLOCK_LENGTHS_CM", "BLOCK_WIDTH_CM",
     "BLOCK_JOINT_CM", "BLOCK_OPENING_JOINT_CM", "PIER_MODULE_CM",
     "BLOCK_COMPENSATORS_ENABLED_BY_DEFAULT", "MODULATION_WHOLE_CM_TOLERANCE_CM",
     "PIER_LAYOUT_TOLERANCE_CM", "pack_pier_with_blocks",
@@ -72,26 +72,27 @@ OPENING_SOLVER_MAX_AXIS_DELTA_CM = 12
 # ==========================================
 # BASE MATEMATICA DA MODULACAO POR BLOCOS
 #
-# Blocos disponiveis (comprimento em cm), largura 14cm, junta de
+# Pecas disponiveis em pilaretes comuns (comprimento em cm), largura 14cm, junta de
 # assentamento de 1cm ENTRE blocos e ENTRE o bloco e a parede, e junta
 # ZERO entre o bloco e a abertura.
 #
 # DE ONDE SAI A REGRA "PILARETE TERMINA EM 0 OU 5" (nao e' convencao, e'
-# consequencia): somando cada bloco com a sua junta temos 39+1=40,
-# 34+1=35, 19+1=20, 9+1=10 e 4+1=5 - TODOS multiplos de 5. Logo um
+# consequencia): somando cada peca com a sua junta temos 39+1=40,
+# 19+1=20, 9+1=10 e 4+1=5 - TODOS multiplos de 5. Logo um
 # pilarete montado como junta+bloco+junta+bloco+... vale exatamente a soma
 # de (bloco+1), e portanto e' sempre multiplo de 5.
 #
-# Conferido contra o desenho de referencia do usuario: o pilarete de 55cm
-# aparece cotado como 1 | 19 | 1 | 34, e 1+19+1+34 = 55 = (19+1)+(34+1).
-#
-# Verificado tambem que TODO multiplo de 5 e' construivel com estas cinco
-# pecas (o bloco de 4cm fecha qualquer sobra de 5cm), ou seja: os blocos
-# NAO impoem nenhuma restricao alem de "multiplo de 5" - o empacotamento
-# vira um problema separado, sempre solucionavel.
+# Ser multiplo de 5 e' necessario, mas nao suficiente: B34 e' exclusivo de
+# amarracao e C09/C04 ficam limitados a uma unica excecao. Sem composicao
+# valida, o trecho segue para ajuste geometrico ou diagnostico.
 # ==========================================
 
-BLOCK_LENGTHS_CM = (39, 34, 19, 9, 4)
+# B34 e' uma peca de amarracao. A aritmetica de pilaretes comuns nao pode
+# usa-la apenas porque ela fecha uma sobra; os solvers L/T a reservam e a
+# posicionam explicitamente. C09/C04 continuam disponiveis como excecao,
+# limitada a uma unica peca por pilarete pelo empacotador abaixo.
+BLOCK_LENGTHS_CM = (39, 19, 9, 4)
+BOND_ONLY_BLOCK_LENGTHS_CM = (34,)
 BLOCK_WIDTH_CM = 14
 BLOCK_JOINT_CM = 1            # entre blocos e entre bloco e parede
 BLOCK_OPENING_JOINT_CM = 0    # entre bloco e abertura
@@ -147,8 +148,8 @@ def pack_pier_with_blocks(pier_cm):
     Modelo (ver cabecalho da secao): pilarete = junta + b1 + junta + b2 +
     ... , com junta ZERO contra a abertura; equivale a somar (bloco+1) de
     cada peca. Resolve por programacao dinamica em unidades de 5cm,
-    minimizando a QUANTIDADE de pecas - e' o que faz o resultado preferir
-    blocos grandes (39/34) em vez de encher de blocos de 4cm.
+    minimizando primeiro as pecas de excecao (9/4cm) e depois a QUANTIDADE
+    total. B34 nao participa: ele e' reservado aos encontros L/T.
 
     Devolve (lista_de_blocos_decrescente, sobra_cm). Sobra 0 significa
     modulacao perfeita; devolve (None, pier_cm) se `pier_cm` nao for
@@ -161,12 +162,18 @@ def pack_pier_with_blocks(pier_cm):
     unit_of = [(b, (b + BLOCK_JOINT_CM) // PIER_MODULE_CM) for b in BLOCK_LENGTHS_CM]
     best = [None] * (units + 1)
     choice = [None] * (units + 1)
-    best[0] = 0
+    best[0] = (0, 0)
     for u in range(1, units + 1):
         for block_cm, block_units in unit_of:
             if block_units > u or best[u - block_units] is None:
                 continue
-            candidate = best[u - block_units] + 1
+            previous_exceptions, previous_count = best[u - block_units]
+            candidate = (
+                previous_exceptions + (1 if block_cm in (9, 4) else 0),
+                previous_count + 1,
+            )
+            if candidate[0] > 1:
+                continue
             if best[u] is None or candidate < best[u]:
                 best[u] = candidate
                 choice[u] = block_cm

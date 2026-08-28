@@ -171,8 +171,11 @@ class TestWallsFromCapture(unittest.TestCase):
 
         self.assertEqual(diagnostics["status"], "ok")
         self.assertTrue(candidates)
-        self.assertTrue(all(candidate["z_cm"] >= 301.0 for candidate in candidates))
-        self.assertTrue(any(candidate["z_cm"] >= 521.0 for candidate in candidates))
+        self.assertTrue(all(candidate["z_cm"] >= 1.0 for candidate in candidates))
+        self.assertTrue(any(candidate["z_cm"] >= 221.0 for candidate in candidates))
+        self.assertEqual(diagnostics["z_reference_cm"], 300.0)
+        self.assertEqual(diagnostics["blocks_below_reference_count"], 0)
+        self.assertEqual(diagnostics["lintel_missing_count"], 0)
         self.assertTrue(all(candidate["color_rgb"] == [10, 20, 30] for candidate in candidates))
         self.assertTrue(any(candidate["cells_local_cm"] for candidate in candidates))
 
@@ -186,6 +189,27 @@ class TestWallsFromCapture(unittest.TestCase):
         _adjusted, report, _candidates, diagnostics = adjust_capture_openings(capture)
         self.assertEqual(diagnostics["status"], "ok")
         self.assertEqual(len(report["actions"]), 1)
+
+    def test_cota_negativa_da_planta_vira_zero_sem_mover_as_aberturas_relativas(self):
+        capture = {
+            "walls": [
+                {"element_id": "101", "start": [0, 0], "end": [300, 0],
+                 "thickness_cm": 14, "height_cm": 280, "base_z_cm": -75,
+                 "level": "Nivel Terreo"},
+            ],
+            "openings": [
+                {"element_id": "201", "host_wall_id": "101", "center_cm": [150, 0],
+                 "width_cm": 80, "sill_cm": -75, "head_cm": 135},
+            ],
+        }
+
+        walls, diagnostics = walls_from_capture(capture)
+
+        self.assertEqual(diagnostics["z_reference_cm"], -75.0)
+        self.assertEqual(walls[0]["base_z_cm"], 0.0)
+        lintel = [s for s in walls[0]["cutout_segments"] if s["origin"] == "abertura"][0]
+        self.assertEqual(lintel["base_z_cm"], 210.0)
+        self.assertEqual(diagnostics["walls_below_reference_count"], 0)
 
 
 if __name__ == "__main__":

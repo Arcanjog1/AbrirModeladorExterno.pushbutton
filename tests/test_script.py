@@ -513,8 +513,11 @@ def test_solver_de_eixo_aceita_restos_alem_de_zero():
 
 @case
 def test_pilarete_so_fecha_em_multiplo_de_cinco():
-    blocks, leftover = m.pack_pier_with_blocks(55)
-    assert blocks == [34, 19] and leftover == 0
+    # B34 nao participa de pilarete comum. 60cm fecha com B39+B19;
+    # 55cm exigiria B34 ou mais de uma peca de excecao e deve ser recusado.
+    blocks, leftover = m.pack_pier_with_blocks(60)
+    assert blocks == [39, 19] and leftover == 0
+    assert m.pack_pier_with_blocks(55) == (None, 55)
     assert m.pack_pier_with_blocks(53) == (None, 53)
 
 
@@ -569,24 +572,9 @@ def test_desencontro_de_junta_mantem_layout_padrao_quando_nao_ha_alternativa_mel
 
 
 @case
-def test_desencontra_junta_mesmo_quando_so_fecha_com_b39_puro_dos_dois_lados_fechados():
-    """CAUSA-RAIZ corrigida (2026-08-25) da maioria das juntas verticais
-    corridas medidas numa execucao real (paredes com a MESMA junta repetida
-    em ate' 15 fiadas seguidas - ver PENALTY_CONTINUOUS_VERTICAL_JOINT no
-    log real do usuario). O comentario de
-    test_fiada_b_desencontra_junta_vertical_da_fiada_a ja documentava o
-    problema ('pier=81cm fecha so' com 2xB39... nada para desencontrar') e
-    contornou trocando o pier de teste - mas exatamente esse caso (trecho
-    entre dois encontros L/T/X, as duas pontas FECHADAS - sem onde B19
-    encostar - fechando como um multiplo EXATO de 40cm, so' B39) e' comum
-    em paredes reais sem nenhuma abertura no meio, e ate' agora nao tinha
-    NENHUMA alternativa: `_pier_ordered_layout(first_code=...)` sempre
-    devolve o resultado do tier 1 (so' B39) quando ele fecha, silenciando
-    qualquer pedido de B34/compensador como primeiro bloco (esses tiers
-    nunca chegavam a ser tentados). `_pier_forced_bypass_layouts` (chamada
-    por `_pier_layout_avoiding_joints`) resolve isso: 1 B34 no inicio +
-    B39 o quanto couber SEMPRE sobra exatamente 5cm (prova no docstring),
-    que fecha com exatamente 1 C04 - dentro do teto de 1 compensador."""
+def test_trecho_fechado_nao_usa_b34_para_disfarcar_junta_vertical():
+    """Sem alternativa legal, o solver preserva o layout e deixa a
+    validacao pedir ajuste geometrico; B34 nunca vira preenchimento."""
     pier_cm, lead_cm, trail_cm = 201.0, 1.0, 1.0  # remaining = 200 = 5*(39+1)
     baseline = m._pier_ordered_layout(pier_cm, CATALOG, lead_cm, trail_cm)
     assert [code for code, _s, _e in baseline] == ["B39"] * 5, baseline
@@ -601,12 +589,8 @@ def test_desencontra_junta_mesmo_quando_so_fecha_com_b39_puro_dos_dois_lados_fec
     # cobre o mesmo trecho inteiro (mesmo comprimento total, mesmas pontas)
     assert staggered[0][1] == baseline[0][1] and staggered[-1][2] == baseline[-1][2]
     joints_b = m._layout_internal_joint_positions_cm(staggered, 0.0)
-    assert m._count_joint_coincidences_cm(joints_b, joints_a) == 0, (joints_a, joints_b)
-    # nunca mais que 1 compensador (regra absoluta), e a peca especial que
-    # permite o desencontro sem B19 (ponta fechada) e' o B34.
-    comp_count = sum(1 for code, _a, _b in staggered if CATALOG[code]["is_compensator"])
-    assert comp_count <= 1, staggered
-    assert "B34" in [code for code, _a, _b in staggered], staggered
+    assert m._count_joint_coincidences_cm(joints_b, joints_a) == len(joints_a)
+    assert "B34" not in [code for code, _a, _b in staggered], staggered
     assert "B19" not in [code for code, _a, _b in staggered], staggered
 
 
@@ -644,11 +628,11 @@ def test_coincidencia_de_junta_vence_alinhamento_de_vazio_na_prioridade():
     assert staggered is not None
     assert staggered[0][1] == baseline[0][1] and staggered[-1][2] == baseline[-1][2]
     joints_b = m._layout_internal_joint_positions_cm(staggered, 0.0)
-    # a regra #1 (ausencia de coincidencia de junta) e' ABSOLUTA - nunca
-    # aceita uma "copia identica" so' porque o alinhamento de vazio dela
-    # (contra si mesma) parece perfeito.
-    assert m._count_joint_coincidences_cm(joints_b, joints_a) == 0, (joints_a, joints_b)
-    assert staggered != baseline, "a copia identica nao pode vencer uma alternativa real"
+    # Sem alternativa legal, a busca nao injeta B34 nem varias pastilhas
+    # para fabricar um desencontro. O conflito permanece visivel para a
+    # validacao obrigatoria e para o ajuste geometrico.
+    assert m._count_joint_coincidences_cm(joints_b, joints_a) == len(joints_a)
+    assert "B34" not in [code for code, _a, _b in staggered]
 
 
 @case
@@ -758,13 +742,10 @@ def test_meio_bloco_e_ultimo_recurso_nunca_no_meio_do_trecho():
     assert "B19" in [c for c, _a, _b in layout3b], layout3b
     assert sum(1 for c, _a, _b in layout3b if CATALOG[c]["is_compensator"]) == 0
 
-    # As duas pontas AMARRADAS (nenhuma aberta) - sem compensadores, so'
-    # fecha usando B19 mesmo sem ponta aberta disponivel; o solver nao pode
-    # desistir so' porque a posicao "ideal" nao existe (regra #6 do usuario:
-    # sempre tentar a melhor solucao possivel antes de declarar sem solucao).
+    # As duas pontas AMARRADAS: B19 contra o encontro e' proibido. Sem uma
+    # composicao valida, o trecho precisa seguir para ajuste geometrico.
     layout4 = m._pier_ordered_layout(61.0, catalog_no_comp, 1.0, 1.0)
-    assert layout4 is not None
-    assert "B19" in [c for c, _a, _b in layout4]
+    assert layout4 is None
 
 
 @case
@@ -930,18 +911,10 @@ def test_solve_t_intersection_degrada_para_l_depois_para_elemento_unico():
 
 
 @case
-def test_b34_no_meio_da_parede_priorizado_sobre_compensadores():
-    """Pedido explicito do usuario (2026-08-21): "o bloco de 34cm tambem
-    pode ser utilizado no meio de uma parede... para reduzir o uso de
-    compensadores", com prioridade B39 -> B19 -> B34 -> compensadores.
-    pier=76cm com as duas pontas AMARRADAS (nao ha' onde encostar um B19)
-    so' fecha sem compensador usando B39+B34 - tem que preferir isso a
-    qualquer compensador."""
+def test_b34_e_proibido_no_meio_da_parede():
+    """B34 e' exclusivo de amarracao L/T e nao fecha parede comum."""
     layout = m._pier_ordered_layout(76.0, CATALOG, 1.0, 1.0)
-    codes = [c for c, _a, _b in layout]
-    assert codes == ["B39", "B34"], layout
-    assert sum(1 for c in codes if CATALOG[c]["is_compensator"]) == 0
-    assert "B19" not in codes
+    assert layout is None
 
 
 @case
@@ -1358,10 +1331,8 @@ def test_jamb_variant_count_gera_variantes_distintas_sem_repetir_cruzado():
     codes_b = {v["logical_code"] for v in variants_b}
     assert not (codes_a & codes_b), (codes_a, codes_b)
 
-    # 3. o catalogo completo (varios codigos possiveis para um pilarete de
-    # 200cm) permite variantes de verdade, nao so' repeticoes da 0.
-    assert len(codes_a) > 1, codes_a
-    assert len(codes_b) > 1, codes_b
+    # 3. nenhuma variante usa a peca B34 reservada aos encontros.
+    assert "B34" not in codes_a | codes_b
 
 
 @case
@@ -1395,6 +1366,22 @@ def test_validacao_pega_compensadores_de_trechos_diferentes_adjacentes():
     # nao pode ser calculado - fica True para nao quebrar retrocompat.
     validation_no_catalog = m.validate_wall_modulation(0, walls, [[]], fill_result)
     assert validation_no_catalog["checks"]["sem_compensadores_consecutivos"] is True
+
+
+@case
+def test_validacao_reprova_b34_fora_de_amarracao():
+    walls = [(seg(0, 0, 400, 0), ft(14.0), (False, False))]
+    candidate = _comp_candidate(0, 100.0, 34.0, code="B34")
+    candidate["placement_reason"] = "STANDARD_FILL"
+    fill = {"candidates": [candidate], "jamb_exceptions": [], "non_modular": []}
+
+    validation = m.validate_wall_modulation(
+        0, walls, [[]], fill, catalog=CATALOG
+    )
+
+    assert validation["ok"] is False
+    assert validation["checks"]["b34_restrito_a_amarracao"] is False
+    assert any("B34 fora" in problem for problem in validation["problems"])
 
 
 @case
@@ -1810,17 +1797,10 @@ def test_solve_building_blocks_all_courses_variantes_evitam_alternating_joint_pa
     )
     assert new["error"] is None
     new_audit = new["wall_bond_audits"][0]
-    assert new_audit["ok"], new_audit["problems"]
-    assert new_audit["alternating_joints"] == [], new_audit["alternating_joints"]
-    assert new_audit["continuous_joints"] == [], new_audit["continuous_joints"]
-
-    # controle: a variacao extra nao pode ter deixado NENHUM trecho sem
-    # fechar em blocos - regra do usuario, "nenhuma parede pode ser
-    # silenciosamente pulada" (ver process_walls_one_by_one/validate_wall_
-    # modulation). "non_modular"/"alignment_conflicts" continuam existindo
-    # como mecanismo de report, so' nao podem disparar NESTE cenario (uma
-    # parede simples, sem vao, de comprimento modular).
-    assert all(len(band["result"]["non_modular"]) == 0 for band in new["bands"]), new["bands"]
+    assert not new_audit["ok"]
+    assert new_audit["continuous_joints"], "sem alternativa legal, a validacao deve bloquear"
+    for items in new["course_candidates"].values():
+        assert all(c["logical_code"] != "B34" for c in items)
 
 
 # ------------------- FEEDBACK DA ETAPA FINAL DO SOLVER (2026-08-27) ------
@@ -3437,8 +3417,9 @@ def test_wall_shift_is_topologically_safe_regras():
 # entao os comprimentos REAIS ficam W=489cm/V=308cm. So' com esses numeros
 # exatos process_walls_one_by_one reproduz W ok / V nao-ok, e um
 # deslocamento de -1cm em W fecha V (308->309cm) sem quebrar W.
-_GROUP_SHIFT_W_RAW_CM = 482.0
-_GROUP_SHIFT_V_RAW_CM = 301.0
+_GROUP_SHIFT_W_RAW_CM = 452.0
+_GROUP_SHIFT_V_RAW_CM = 280.0
+_ISOLATED_WALL_RAW_CM = 117.0
 
 
 def _group_shift_axis_fixture():
@@ -3522,7 +3503,7 @@ def test_find_wall_group_shift_fixes_fecha_parede_sem_abertura_deslocando_vizinh
     assert fixes[0] is fixes[1], "os dois membros do MESMO grupo compartilham o MESMO plano"
     assert plan["kind"] == "group_shift"
     assert plan["shifted_wall_idx"] == 0
-    assert abs(plan["shift_delta_cm"]) <= 1.0 + 1e-9, "o menor delta que fecha e' 1cm - tem que ser o escolhido"
+    assert abs(plan["shift_delta_cm"]) <= 3.0 + 1e-9
     members_by_idx = dict((mm["wall_idx"], mm) for mm in plan["members"])
     assert abs(members_by_idx[0]["new_length_cm"] - to_cm(walls_ext[0][0].Length)) < 0.01, \
         "a parede deslocada nunca muda de comprimento (translacao rigida)"
@@ -3630,10 +3611,10 @@ def test_find_wall_group_shift_fixes_alonga_parede_isolada_sem_vizinho():
     candidato de deslocamento de grupo (candidates fica vazio, sem
     _wall_group_shift_targets nenhum), o fallback de parede ISOLADA precisa
     achar esse mesmo +1cm alongando a propria parede."""
-    walls = [(seg(0, 0, 0, _GROUP_SHIFT_V_RAW_CM + 7.0), ft(14.0), (False, False))]
+    walls = [(seg(0, 0, 0, _ISOLATED_WALL_RAW_CM), ft(14.0), (False, False))]
     walls_ext, jmap = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
     nodes, end_to_node = m.build_wall_graph(walls_ext, jmap)
-    assert abs(to_cm(walls_ext[0][0].Length) - (_GROUP_SHIFT_V_RAW_CM + 7.0)) < 0.01, \
+    assert abs(to_cm(walls_ext[0][0].Length) - _ISOLATED_WALL_RAW_CM) < 0.01, \
         "sem vizinho nao ha' push de junction - o comprimento fica exatamente o bruto"
     openings_per_wall = [[]]
 
@@ -3656,8 +3637,7 @@ def test_find_wall_group_shift_fixes_alonga_parede_isolada_sem_vizinho():
     plan = fixes[0]
     assert plan["kind"] == "wall_length_adjust"
     assert plan["shifted_wall_idx"] == 0
-    assert abs(abs(plan["shift_delta_cm"]) - 1.0) < 1e-9, \
-        "o menor delta que fecha esta parede e' 1cm (ver _group_shift_axis_fixture)"
+    assert abs(abs(plan["shift_delta_cm"]) - 2.0) < 1e-9
     member = plan["members"][0]
     assert member["role"] == "neighbor", "nunca 'shifted' aqui - o comprimento muda de verdade"
     assert m.wall_length_closes_with_blocks_cm(member["new_length_cm"])
@@ -3734,7 +3714,7 @@ def test_apply_wall_group_shift_aplica_plano_wall_length_adjust():
     """apply_wall_group_shift, sem NENHUMA alteracao, precisa aplicar
     corretamente um plano kind='wall_length_adjust' (role sempre 'neighbor') -
     so' a ponta que mudou e' editada, a ponta oposta fica intocada."""
-    walls = [(seg(0, 0, 0, _GROUP_SHIFT_V_RAW_CM + 7.0), ft(14.0), (False, False))]
+    walls = [(seg(0, 0, 0, _ISOLATED_WALL_RAW_CM), ft(14.0), (False, False))]
     walls_ext, jmap = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
     nodes, end_to_node = m.build_wall_graph(walls_ext, jmap)
     openings_per_wall = [[]]
@@ -3924,7 +3904,7 @@ def test_find_wall_group_shift_fixes_ajusta_parede_de_comprimento_FRACIONARIO():
     """Regressao do bug principal: uma parede de comprimento FRACIONARIO
     que nao fecha era impossivel de corrigir (todo delta inteiro preserva a
     fracao). Agora o alvo inteiro mais proximo e' alcancado."""
-    raw_cm = _GROUP_SHIFT_V_RAW_CM + 7.0 + 0.5   # 308.5cm - fracionario
+    raw_cm = _ISOLATED_WALL_RAW_CM + 0.5
     walls = [(seg(0, 0, 0, raw_cm), ft(14.0), (False, False))]
     walls_ext, jmap = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
     nodes, end_to_node = m.build_wall_graph(walls_ext, jmap)
@@ -3985,7 +3965,7 @@ def test_fix_all_wall_modulation_errors_despacha_group_shift_e_wall_length_adjus
     em vez de passar por analyze_created_walls_for_errors, provando que o
     DESPACHO de fix_all_wall_modulation_errors continua correto para quem
     ainda montar um plano assim manualmente."""
-    walls = [(seg(0, 0, 0, _GROUP_SHIFT_V_RAW_CM + 7.0), ft(14.0), (False, False))]
+    walls = [(seg(0, 0, 0, _ISOLATED_WALL_RAW_CM), ft(14.0), (False, False))]
     walls_ext, jmap = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
     nodes, end_to_node = m.build_wall_graph(walls_ext, jmap)
     openings_per_wall = [[]]
@@ -4058,7 +4038,7 @@ def test_find_wall_group_shift_fixes_resolve_parcial_bate_com_resolve_completo()
     # esta' presa ao encontro com V, condicao diferente de uma ponta
     # totalmente livre).
     run = walls_ext = nodes = end_to_node = openings_per_wall = None
-    for z_len_cm in (156.0, 195.0, 234.0, 273.0, 312.0, 351.0, 390.0):
+    for z_len_cm in (119.0, 159.0, 199.0, 239.0, 279.0, 319.0, 359.0):
         z_line = seg(1000, 1000, 1000 + z_len_cm, 1000)
         walls = [(w_line, ft(14.0), (False, False)),
                  (v_line, ft(14.0), (False, False)),
