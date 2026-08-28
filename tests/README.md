@@ -51,7 +51,29 @@ Sem dependencias externas.
 | Regra #1 (nunca aumentar a parede) | plano com fronteira fora do eixo e' recusado; validacao final reprova crescimento; `apply_axis_opening_fix` recusa antes de tocar no modelo |
 | Regras de modulacao | **nao ha' mais regra de digito para paredes** (111cm e 129cm passam); largura de abertura ainda em 1/6/9; pilarete fecha pela aritmetica das juntas; layout de pilarete com juntas |
 | Interface | as tres janelas montam; validacao bloqueia Executar; memoria da execucao anterior; abas do resultado |
+| Criacao no Revit (Etapa 5) | alternancia A/B por fiada fisica e cota de cada fiada; contadores do perfil de tempo (quantas pecas passam por NewFamilyInstance/RotateElement/MirrorElement); progresso ao vivo |
 | Regressoes | cor do realce (Revit x WinForms), log com acento, intervalos duplicados de meio de parede |
 
 Ao mexer no script, rode a suite antes de commitar - varios dos testes
 acima nasceram de bugs reais encontrados por eles.
+
+## O que a suite NAO cobre (Etapa 5 - criacao no Revit)
+
+Os dubles nao sao o Revit: `_StubCreate.NewFamilyInstance` devolve um Id e
+`_StubElementTransformUtils` apenas ANOTA a rotacao/espelhamento pedidos.
+Entao a suite prova QUAIS chamadas sao feitas, com quais argumentos e em
+que ordem - **nunca** quanto elas custam nem onde a peca foi parar de
+fato no modelo.
+
+Duas consequencias praticas:
+
+- **Tempo.** O perfil de tempo da criacao (`perf` em
+  `create_building_blocks`, ver `format_create_perf_report`) so' produz
+  numero real rodando dentro do Revit. Aqui os testes conferem a
+  estrutura e as contagens; os segundos saem no log da execucao real, na
+  secao `PERFIL DE TEMPO DA CRIACAO`.
+- **Posicao/rotacao/espelhamento reais.** O `--fingerprint` do
+  `solver_bench.py` cobre o **solver** (as pecas DECIDIDAS), nao a
+  criacao. Mudanca em `create_building_blocks` continua exigindo
+  conferencia no Revit: criar um lote antes e depois e comparar posicao,
+  rotacao e espelhamento das instancias.

@@ -1246,6 +1246,44 @@ def test_on_create_done_anexa_o_relatorio_final_consolidado_no_log():
 
 
 @case
+def test_on_create_done_leva_o_perfil_de_tempo_para_o_log():
+    """Wiring fim-a-fim do Item 1: nao basta MEDIR dentro do Revit - os
+    numeros tem que sair da maquina do usuario. `_on_create_done` anexa o
+    bloco de perfil ao MESMO log que o botao "Copiar log" copia, entao
+    medir passa a ser automatico em toda execucao (nada de script
+    separado, nada de o usuario ter que lembrar de ligar nada)."""
+    report_dict = {"kpis": [], "highlights": [], "issues": [], "log": "", "log_path": None}
+    handler = _make_post_creation_handler(error_rows=[])
+    handler.walls_to_create = [(seg(0, 0, 100, 0), ft(14.0), (False, False))]
+    handler.solve_result = {"wall_bond_audits": {}, "collisions": [], "door_void_violations": []}
+    handler.create_result = {
+        "created_count": 2, "failures": [], "created_instances": [],
+        "course_height_ft": ft(20.0), "course_height_error": None,
+        "skipped_wall_count": 0, "skipped_wall_idxs": [],
+        "reproved_wall_count": 0, "reproved_wall_idxs": [],
+        "perf": {
+            "instances": 2, "planned_total": 2, "failed_count": 0,
+            "total_s": 8.0, "activate_s": 0.5, "loop_s": 3.0,
+            "commit_s": 4.0, "assimilate_s": 0.5,
+            "new_instance_s": 2.0, "new_instance_calls": 2,
+            "rotate_s": 0.5, "rotate_calls": 1,
+            "mirror_s": 0.0, "mirror_calls": 0,
+            "aux_geometry_s": 0.1, "failed_s": 0.0,
+        },
+        "perf_steps": [("create_building_blocks (criacao das FamilyInstance)", 8.0, "2 instancia(s) criada(s)")],
+    }
+
+    form = m._PostCreationForm(report_dict, None, handler, [])
+    form._on_create_done("create", None)
+
+    log_text = form._log_box.Text
+    assert "PERFIL DE TEMPO DA CRIACAO" in log_text
+    assert "NewFamilyInstance" in log_text and "MirrorElement" in log_text
+    assert "Transaction.Commit()" in log_text
+    assert "nenhuma chamada" in log_text, "MirrorElement sem nenhuma peca espelhada precisa dizer isso"
+
+
+@case
 def test_jamb_bloco_principal_repetido_e_recusado_mesmo_alinhado():
     """REGRA CRITICA #1 (excecao), pedido explicito do usuario (2026-08-24):
     junta vertical coincidente entre fiadas so' e' tolerada perto de
@@ -2305,15 +2343,25 @@ def test_execute_create_apaga_lote_anterior_antes_de_recriar():
     handler.solve_result = {"candidates": [], "course_candidates": {}, "num_courses": 0, "error": None}
 
     deleted_ids = []
+    delete_calls = []
     existing_ids = set([old_id_1, old_id_2])
 
     class _FakeDeletableDoc(object):
         def GetElement(self, element_id):
             return object() if element_id in existing_ids else None
 
-        def Delete(self, element_id):
-            deleted_ids.append(element_id)
-            existing_ids.discard(element_id)
+        def Delete(self, ids_or_id):
+            # DESDE 2026-08-28 o lote anterior e' apagado de uma vez
+            # (Document.Delete(ICollection<ElementId>), 3,7x mais rapido que
+            # um Delete por peca - medido ao vivo via MCP nas 10.741 pecas de
+            # uma planta real). O duble aceita as DUAS formas de proposito: a
+            # colecao e' o caminho normal, e o Id solto e' o fallback que so'
+            # roda se o Revit recusar o lote inteiro.
+            delete_calls.append(ids_or_id)
+            batch = ids_or_id if isinstance(ids_or_id, list) else [ids_or_id]
+            for element_id in batch:
+                deleted_ids.append(element_id)
+                existing_ids.discard(element_id)
 
     events = []
     handler.on_done = lambda kind, err: events.append((kind, err))
@@ -2327,6 +2375,12 @@ def test_execute_create_apaga_lote_anterior_antes_de_recriar():
 
     assert events and events[0] == ("create", None), events
     assert set(deleted_ids) == set([old_id_1, old_id_2]), deleted_ids
+    # UMA chamada so', com a colecao inteira. Se isto voltar a ser um Delete
+    # por peca, a exclusao do lote volta a custar 3,7x mais (6,70s contra
+    # 1,82s nas 10.741 pecas medidas) sem que nada mais quebre - e' o tipo de
+    # regressao que so' um teste pega.
+    assert len(delete_calls) == 1, delete_calls
+    assert isinstance(delete_calls[0], list) and len(delete_calls[0]) == 2, delete_calls
     # create_result foi substituido pelo resultado (vazio) da nova rodada -
     # nunca continua apontando para instancias ja' apagadas do modelo.
     assert handler.create_result["created_instances"] == []
@@ -2338,6 +2392,58 @@ def test_execute_create_apaga_lote_anterior_antes_de_recriar():
     handler.action = "create"
     handler.Execute(fake_uiapp)
     assert len(deleted_ids) == deleted_count_before, deleted_ids
+
+
+@case
+def test_execute_create_volta_a_apagar_uma_a_uma_se_o_lote_for_recusado():
+    """Rede de seguranca da exclusao em lote (2026-08-28).
+    Document.Delete(ICollection) e' tudo-ou-nada: um unico ElementId que o
+    Revit recuse faz a chamada lancar SEM apagar nada. O laco antigo, por ser
+    peca a peca, simplesmente pulava a peca ruim. Deixar o lote falhar em
+    silencio traria de volta o bug de 2026-08-25 pela porta dos fundos - o
+    lote anterior sobreviveria inteiro e o clique em "criar" voltaria a ser
+    uma SOMA em vez de uma substituicao, com metade da modulacao na posicao
+    nova e metade na antiga. Por isso, colecao recusada = cai no caminho
+    antigo e apaga tudo que der, uma a uma."""
+    handler = m._PostCreationEventHandler()
+    old_ids = [revit_stubs.ElementId(201), revit_stubs.ElementId(202),
+               revit_stubs.ElementId(203)]
+    handler.create_result = {
+        "created_count": len(old_ids), "failures": [], "created_instances": [
+            {"id": eid, "logical_code": "B39", "course": "A", "course_index": 0}
+            for eid in old_ids
+        ],
+    }
+    handler.solve_result = {"candidates": [], "course_candidates": {}, "num_courses": 0, "error": None}
+
+    deleted_ids = []
+    batch_attempts = []
+
+    class _FakeDocQueRecusaLote(object):
+        def GetElement(self, element_id):
+            return object() if element_id not in deleted_ids else None
+
+        def Delete(self, ids_or_id):
+            if isinstance(ids_or_id, list):
+                batch_attempts.append(list(ids_or_id))
+                raise Exception("Revit recusou a colecao inteira")
+            deleted_ids.append(ids_or_id)
+
+    events = []
+    handler.on_done = lambda kind, err: events.append((kind, err))
+    handler.action = "create"
+    fake_uidoc = revit_stubs._Inert()
+    fake_uidoc.Document = _FakeDocQueRecusaLote()
+    fake_uiapp = revit_stubs._Inert()
+    fake_uiapp.ActiveUIDocument = fake_uidoc
+
+    handler.Execute(fake_uiapp)
+
+    assert events and events[0] == ("create", None), events
+    assert len(batch_attempts) == 1, "o lote tem que ser tentado UMA vez antes do fallback"
+    assert set(deleted_ids) == set(old_ids), (
+        "com o lote recusado, TODAS as pecas ainda precisam ser apagadas uma a uma"
+    )
 
 
 @case
@@ -2376,9 +2482,11 @@ def test_execute_create_cria_paredes_reprovadas_na_auditoria_de_amarracao_e_marc
     captured = {}
 
     def _fake_create_building_blocks(app_doc, candidates, catalog, base_z_abs, level, num_courses,
-                                      course_candidates=None):
+                                      course_candidates=None, progress_cb=None, stage_cb=None):
         captured["candidates"] = candidates
         captured["course_candidates"] = course_candidates
+        captured["progress_cb"] = progress_cb
+        captured["stage_cb"] = stage_cb
         created = [
             {"id": revit_stubs.ElementId(100 + i), "logical_code": c["logical_code"],
              "course": c["course"], "course_index": 0, "candidate_key": id(c)}
@@ -4109,6 +4217,300 @@ def test_create_building_blocks_um_candidato_com_erro_nao_derruba_os_outros():
     assert len(result["failures"]) == 1, result["failures"]
     assert "erro real simulado" in result["failures"][0]
     assert len(result["created_instances"]) == 1
+
+
+# ==========================================
+# ITEM 1 - ACELERAR A CRIACAO NO REVIT (Etapa 5): MEDIR ANTES DE OTIMIZAR.
+#
+# A criacao virou o passo mais lento do fluxo depois que o solver (Etapa 4)
+# deixou de travar. Numa planta real de 306 eixos, o solver devolve ~30 mil
+# candidatos por PAR de fiadas e o pe-direito da 15 fiadas fisicas - ou
+# seja, a ordem de 200 MIL FamilyInstance, cada uma com ate' tres chamadas
+# de API. Nao da' para cronometrar isso aqui: os dubles nao sao o Revit e
+# nao custam o que a API real custa. O que a suite offline PODE garantir -
+# e e' o que estes testes fazem - e' que a instrumentacao existe, conta o
+# que diz contar (quantas pecas passam por cada chamada) e nao muda NENHUMA
+# peca criada. Os tempos em si so' saem rodando no Revit de verdade.
+# ==========================================
+
+
+@case
+def test_create_building_blocks_perfila_cada_chamada_de_api_separadamente():
+    """"perf" separa o tempo por CHAMADA DE API e conta quantas pecas
+    passaram por cada uma - nem toda peca rotaciona, nem toda peca espelha,
+    e sem essa contagem um tempo acumulado nao diz nada (10s em
+    RotateElement significa coisas opostas se forem 3 pecas ou 200 mil).
+    Aqui: 3 pecas criadas, so' 1 rotacionada e so' 1 espelhada."""
+    catalog = {"B39": _real_catalog_entry("B39"), "C09": _real_catalog_entry("C09")}
+    candidates = [
+        {"wall_idx": 0, "logical_code": "B39", "course": "A",
+         "origin_world": XYZ(ft(0), ft(0), 0.0), "rotation_deg": 0.0,
+         "mirrored": False, "placement_reason": "preenchimento"},
+        {"wall_idx": 0, "logical_code": "B39", "course": "A",
+         "origin_world": XYZ(ft(39), ft(0), 0.0), "rotation_deg": 90.0,
+         "mirrored": False, "placement_reason": "preenchimento"},
+        {"wall_idx": 0, "logical_code": "C09", "course": "A",
+         "origin_world": XYZ(ft(78), ft(0), 0.0), "rotation_deg": 0.0,
+         "mirrored": True, "x_dir": XYZ(1.0, 0.0, 0.0),
+         "placement_reason": "compensador"},
+    ]
+    transform = m.ElementTransformUtils
+    del transform.calls[:]
+
+    result = m.create_building_blocks(
+        revit_stubs._StubDoc(), candidates, catalog, base_z_abs=0.0,
+        selected_level=revit_stubs._Inert(), num_courses=1,
+    )
+
+    assert result["created_count"] == 3, result["failures"]
+    perf = result["perf"]
+    assert perf["instances"] == 3
+    assert perf["planned_total"] == 3
+    assert perf["failed_count"] == 0
+    assert perf["new_instance_calls"] == 3
+    assert perf["rotate_calls"] == 1, "so' a peca com rotation_deg != 0 rotaciona"
+    assert perf["mirror_calls"] == 1, "so' a peca com mirrored=True espelha"
+    # As transformacoes chegaram MESMO a' API (o duble registra) - e so' elas.
+    assert [call[0] for call in transform.calls] == ["rotate", "mirror"], transform.calls
+    assert abs(transform.calls[0][3] - m.math.radians(90.0)) < 1e-9, "angulo em radianos"
+    assert transform.calls[1][2].Normal is candidates[2]["x_dir"], (
+        "espelha em torno do plano com normal = x_dir da propria peca"
+    )
+    for key in ("total_s", "loop_s", "commit_s", "activate_s", "assimilate_s",
+                "new_instance_s", "rotate_s", "mirror_s", "aux_geometry_s", "failed_s"):
+        assert isinstance(perf[key], float) and perf[key] >= 0.0, (key, perf[key])
+    assert perf["total_s"] >= perf["loop_s"], perf
+
+
+@case
+def test_create_building_blocks_conta_o_tempo_da_peca_que_falhou():
+    """Peca que estoura no NewFamilyInstance tambem consumiu tempo do
+    Revit - vai para `failed_s`/`failed_count`, nunca para a media das
+    pecas criadas (senao uma planta com muitas falhas mentiria o custo por
+    bloco)."""
+    catalog = {"B39": _real_catalog_entry("B39")}
+    candidates = [
+        {"wall_idx": 0, "logical_code": "B39", "course": "A",
+         "origin_world": XYZ(ft(x), ft(0), 0.0), "rotation_deg": 0.0,
+         "mirrored": False, "placement_reason": "preenchimento"}
+        for x in (0, 39)
+    ]
+    target_doc = revit_stubs._StubDoc()
+    real_new_instance = target_doc.Create.NewFamilyInstance
+    calls = [0]
+
+    def _flaky(point, symbol, level, structural_type):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise Exception("erro real simulado do Revit")
+        return real_new_instance(point, symbol, level, structural_type)
+
+    target_doc.Create.NewFamilyInstance = _flaky
+
+    result = m.create_building_blocks(
+        target_doc, candidates, catalog, base_z_abs=0.0,
+        selected_level=revit_stubs._Inert(), num_courses=1,
+    )
+
+    perf = result["perf"]
+    assert perf["instances"] == 1 and perf["failed_count"] == 1, perf
+    assert perf["new_instance_calls"] == 1, "a chamada que estourou nao conta como criada"
+    assert perf["planned_total"] == 2, "planejadas continua sendo o total de candidatos"
+
+
+@case
+def test_create_building_blocks_mantem_a_alternancia_a_b_apos_o_calculo_previo_das_fiadas():
+    """REDE DE SEGURANCA da refatoracao do Item 1: o filtro por letra de
+    fiada saiu de DENTRO do laco (era refeito a cada fiada) para uma lista
+    calculada uma vez so' (`course_sources`) - necessario para saber o
+    TOTAL de instancias antes de comecar (barra de progresso) sem varrer
+    os candidatos duas vezes. Isso NAO pode mudar nenhuma peca: fiada de
+    indice par continua recebendo SO' os candidatos "A", impar SO' os "B",
+    cada uma na sua cota. O fingerprint do solver nao cobre esta etapa
+    (ele para nas pecas DECIDIDAS, nao nas criadas) - este teste cobre.
+
+    Cotas esperadas (ver _course_z_abs): 1cm na primeira fiada e +20cm
+    (19cm de bloco + 1cm de junta) a cada fiada seguinte; e o Z entregue
+    ao Revit e' OFFSET do nivel, entao `base_z_abs` nao entra nele."""
+    catalog = {"B39": _real_catalog_entry("B39", height_cm=19.0)}
+    candidates = [
+        {"wall_idx": 0, "logical_code": "B39", "course": "A",
+         "origin_world": XYZ(ft(0), ft(0), 0.0), "rotation_deg": 0.0,
+         "mirrored": False, "placement_reason": "preenchimento"},
+        {"wall_idx": 0, "logical_code": "B39", "course": "B",
+         "origin_world": XYZ(ft(39), ft(0), 0.0), "rotation_deg": 0.0,
+         "mirrored": False, "placement_reason": "preenchimento"},
+    ]
+    target_doc = revit_stubs._StubDoc()
+    real_new_instance = target_doc.Create.NewFamilyInstance
+    placed = []
+
+    def _record(point, symbol, level, structural_type):
+        placed.append((round(to_cm(point.X), 3), round(to_cm(point.Z), 3)))
+        return real_new_instance(point, symbol, level, structural_type)
+
+    target_doc.Create.NewFamilyInstance = _record
+
+    result = m.create_building_blocks(
+        target_doc, candidates, catalog, base_z_abs=ft(300.0),
+        selected_level=revit_stubs._Inert(), num_courses=4,
+    )
+
+    assert result["created_count"] == 4, result["failures"]
+    assert [x for x, _z in placed] == [0.0, 39.0, 0.0, 39.0], placed
+    assert [z for _x, z in placed] == [1.0, 21.0, 41.0, 61.0], placed
+    assert [item["course"] for item in result["created_instances"]] == ["A", "B", "A", "B"]
+    assert [item["course_index"] for item in result["created_instances"]] == [0, 1, 2, 3]
+
+
+@case
+def test_create_building_blocks_reporta_progresso_e_etapas_ao_vivo():
+    """A criacao roda no thread principal do Revit (transacao exige
+    contexto de API - nao ha' thread de fundo possivel aqui), entao sem
+    callback a janela fica MUDA do primeiro ao ultimo bloco: foi
+    exatamente o relato de 2026-08-27 ("Criando blocos..." parado, sem
+    saber se estava criando devagar ou travado). `progress_cb` sai a cada
+    CREATE_PROGRESS_STEP pecas (nunca a cada peca - cada aviso repinta a
+    tela) e `stage_cb` anuncia o inicio e o Commit, que e' onde o Revit
+    regenera o modelo e pode ficar muitos minutos sem nenhuma peca nova."""
+    catalog = {"B39": _real_catalog_entry("B39")}
+    candidates = [
+        {"wall_idx": 0, "logical_code": "B39", "course": "A",
+         "origin_world": XYZ(ft(39 * i), ft(0), 0.0), "rotation_deg": 0.0,
+         "mirrored": False, "placement_reason": "preenchimento"}
+        for i in range(5)
+    ]
+    progress, stages = [], []
+    saved_step = m.CREATE_PROGRESS_STEP
+    m.__dict__["CREATE_PROGRESS_STEP"] = 2
+    try:
+        result = m.create_building_blocks(
+            revit_stubs._StubDoc(), candidates, catalog, base_z_abs=0.0,
+            selected_level=revit_stubs._Inert(), num_courses=1,
+            progress_cb=lambda *args: progress.append(args),
+            stage_cb=lambda label: stages.append(label),
+        )
+    finally:
+        m.__dict__["CREATE_PROGRESS_STEP"] = saved_step
+
+    assert result["created_count"] == 5
+    assert progress == [(2, 5, 1, 1), (4, 5, 1, 1)], progress
+    assert any("5 instancia(s)" in label for label in stages), stages
+    assert any("Commit" in label for label in stages), stages
+
+
+@case
+def test_create_building_blocks_nao_deixa_callback_quebrado_derrubar_a_criacao():
+    """Feedback de tela e' enfeite perto de 200 mil blocos ja' criados: um
+    callback que estoura (janela fechada no meio, por exemplo) nunca pode
+    abortar a transacao."""
+    catalog = {"B39": _real_catalog_entry("B39")}
+    candidates = [
+        {"wall_idx": 0, "logical_code": "B39", "course": "A",
+         "origin_world": XYZ(ft(39 * i), ft(0), 0.0), "rotation_deg": 0.0,
+         "mirrored": False, "placement_reason": "preenchimento"}
+        for i in range(3)
+    ]
+
+    def _explode(*args, **kwargs):
+        raise Exception("janela ja' fechada")
+
+    saved_step = m.CREATE_PROGRESS_STEP
+    m.__dict__["CREATE_PROGRESS_STEP"] = 1
+    try:
+        result = m.create_building_blocks(
+            revit_stubs._StubDoc(), candidates, catalog, base_z_abs=0.0,
+            selected_level=revit_stubs._Inert(), num_courses=1,
+            progress_cb=_explode, stage_cb=_explode,
+        )
+    finally:
+        m.__dict__["CREATE_PROGRESS_STEP"] = saved_step
+
+    assert result["created_count"] == 3, result["failures"]
+
+
+@case
+def test_format_create_perf_report_mostra_cada_chamada_com_media_por_peca():
+    """O relatorio e' o unico jeito de os numeros medidos DENTRO do Revit
+    chegarem a quem decide o que otimizar - precisa trazer, por chamada, o
+    acumulado E a media por peca (uma API de 3ms x 200 mil pecas sao 10
+    minutos; uma de 0,01ms nao aparece)."""
+    report = m.format_create_perf_report({
+        "perf": {
+            "instances": 1000, "planned_total": 1000, "failed_count": 0,
+            "total_s": 100.0, "activate_s": 1.0, "loop_s": 60.0,
+            "commit_s": 35.0, "assimilate_s": 4.0,
+            "new_instance_s": 40.0, "new_instance_calls": 1000,
+            "rotate_s": 10.0, "rotate_calls": 500,
+            "mirror_s": 5.0, "mirror_calls": 100,
+            "aux_geometry_s": 2.0, "failed_s": 0.0,
+        },
+        "perf_steps": [("Exclusao do lote anterior", 12.5, "900 instancia(s)")],
+    })
+
+    assert "PERFIL DE TEMPO DA CRIACAO" in report
+    assert "1000 chamada(s), 40.000ms cada" in report, report
+    assert "500 chamada(s), 20.000ms cada" in report, report
+    assert "100 chamada(s), 50.000ms cada" in report, report
+    assert "Transaction.Commit()" in report and "35.0" in report
+    assert "Exclusao do lote anterior" in report and "12.50s" in report
+    assert "100.00s" in report, report
+    # Acima de 2min vem tambem em min+s - uma criacao de 200 mil blocos
+    # imprime "1234.5s", que ninguem le' de cabeca.
+    assert m._fmt_perf_seconds(1234.5) == "1234.5s (20min 34s)", m._fmt_perf_seconds(1234.5)
+    assert m._fmt_perf_seconds(0.0) == "0.00s"
+
+
+@case
+def test_format_create_perf_report_vazio_quando_nao_ha_medicao():
+    """create_result vindo de cache antigo (ou de duble que nao instrumenta)
+    nao pode gerar bloco de perfil - nem estourar."""
+    assert m.format_create_perf_report(None) == ""
+    assert m.format_create_perf_report({}) == ""
+    assert m.format_create_perf_report({"created_count": 3}) == ""
+
+
+@case
+def test_execute_create_cronometra_a_exclusao_do_lote_anterior():
+    """O laco que apaga o lote anterior (um GetElement + um Delete por
+    elemento) e' o outro suspeito de custo da Etapa 5 - num recalculo ele
+    apaga tantos elementos quantos vai recriar. Ele entra em `perf_steps`
+    com tempo e contagem, para aparecer no mesmo relatorio."""
+    handler = m._PostCreationEventHandler()
+    old_ids = [revit_stubs.ElementId(201), revit_stubs.ElementId(202)]
+    handler.create_result = {
+        "created_count": 2, "failures": [], "created_instances": [
+            {"id": old_ids[0], "logical_code": "B39", "course": "A", "course_index": 0},
+            {"id": old_ids[1], "logical_code": "B39", "course": "B", "course_index": 1},
+        ],
+    }
+    handler.solve_result = {"candidates": [], "course_candidates": {}, "num_courses": 0, "error": None}
+
+    class _FakeDeletableDoc(object):
+        def GetElement(self, element_id):
+            return object()
+
+        def Delete(self, element_id):
+            return None
+
+    stages = []
+    handler.create_progress_cb = {"progress_cb": None, "stage_cb": lambda label: stages.append(label)}
+    handler.on_done = lambda kind, err: None
+    handler.action = "create"
+    fake_uidoc = revit_stubs._Inert()
+    fake_uidoc.Document = _FakeDeletableDoc()
+    fake_uiapp = revit_stubs._Inert()
+    fake_uiapp.ActiveUIDocument = fake_uidoc
+
+    handler.Execute(fake_uiapp)
+
+    steps = handler.create_result["perf_steps"]
+    labels = [label for label, _seconds, _detail in steps]
+    assert any("Exclusao do lote anterior" in label for label in labels), steps
+    delete_step = [step for step in steps if "Exclusao" in step[0]][0]
+    assert isinstance(delete_step[1], float) and delete_step[1] >= 0.0, delete_step
+    assert "2 instancia(s)" in delete_step[2], delete_step
+    assert any("apagando o lote anterior" in label for label in stages), stages
 
 
 @case
