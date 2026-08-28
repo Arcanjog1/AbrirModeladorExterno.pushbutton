@@ -6,3 +6,7 @@ __pycache__/
 *.log
 .pytest_cache/
 .claude/
+
+# Token cifrado colocado a mao ao lado do loader (por PC) - o blob em si
+# nao e legivel sem a senha, mas nao ha motivo para versionar copias locais.
+token_cifrado.dat
