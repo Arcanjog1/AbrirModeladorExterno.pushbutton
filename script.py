@@ -24,6 +24,7 @@ import os
 import shutil
 import sys
 import traceback
+import zipfile
 
 import clr
 clr.AddReference("System")
@@ -51,6 +52,9 @@ CORE_REPO_PREFIX = EXTERNAL_CLOUD_DIR + "/core/"
 ENTRY_POINT_REPO_PATH = EXTERNAL_CLOUD_DIR + "/external_modelador.py"
 
 TREE_API_URL = "https://api.github.com/repos/{0}/{1}/git/trees/{2}?recursive=1".format(
+    GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH
+)
+ARCHIVE_URL = "https://codeload.github.com/{0}/{1}/zip/refs/heads/{2}".format(
     GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH
 )
 
@@ -502,7 +506,8 @@ def _write_bytes(path, data):
     DotNetFile.WriteAllBytes(path, data)
 
 
-def _sync_package(token):
+def _sync_package_via_api(token):
+    """Fallback legado para ambientes onde o arquivo ZIP nao estiver disponível."""
     files = _list_remote_files(token)
 
     if os.path.isdir(CACHE_TMP_ROOT):
@@ -517,6 +522,54 @@ def _sync_package(token):
         shutil.rmtree(CACHE_ROOT)
     os.rename(CACHE_TMP_ROOT, CACHE_ROOT)
 
+    return os.path.join(CACHE_ROOT, *ENTRY_POINT_REPO_PATH.split("/"))
+
+
+def _sync_package(token):
+    """Baixa uma única revisão ZIP, evitando o limite da API por arquivo.
+
+    O pacote do modelador tem bem mais que a cota anônima de chamadas da API
+    do GitHub. Baixá-lo arquivo a arquivo faz uma primeira instalação pública
+    falhar com HTTP 403 mesmo quando o repositório está público. O codeload
+    baixa a mesma revisão em uma conexão e também funciona com token quando
+    o repositório for privado.
+    """
+    client = _new_web_client(token, "application/octet-stream")
+    try:
+        archive_bytes = client.DownloadData(ARCHIVE_URL)
+    except WebException:
+        # Mantém o caminho antigo como alternativa para instalações/servidores
+        # que bloqueiem codeload.github.com, sem torná-lo o fluxo normal.
+        return _sync_package_via_api(token)
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(bytes(archive_bytes)))
+    except Exception as exc:
+        raise RuntimeError("Arquivo ZIP recebido do GitHub é inválido: {0}".format(exc))
+
+    prefix = "{0}-{1}/".format(GITHUB_REPO, GITHUB_BRANCH)
+    extracted = []
+    if os.path.isdir(CACHE_TMP_ROOT):
+        shutil.rmtree(CACHE_TMP_ROOT)
+    os.makedirs(CACHE_TMP_ROOT)
+    try:
+        for member in archive.namelist():
+            if not member.startswith(prefix + EXTERNAL_CLOUD_DIR + "/"):
+                continue
+            repo_path = member[len(prefix):]
+            if repo_path.endswith("/") or ".." in repo_path.split("/"):
+                continue
+            local_path = os.path.join(CACHE_TMP_ROOT, *repo_path.split("/"))
+            _write_bytes(local_path, archive.read(member))
+            extracted.append(repo_path)
+    finally:
+        archive.close()
+
+    if ENTRY_POINT_REPO_PATH not in extracted:
+        raise RuntimeError("external_modelador.py não apareceu no ZIP do GitHub.")
+    if os.path.isdir(CACHE_ROOT):
+        shutil.rmtree(CACHE_ROOT)
+    os.rename(CACHE_TMP_ROOT, CACHE_ROOT)
     return os.path.join(CACHE_ROOT, *ENTRY_POINT_REPO_PATH.split("/"))
 
 

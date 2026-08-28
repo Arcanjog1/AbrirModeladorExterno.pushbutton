@@ -19,6 +19,11 @@ Se o GitHub ou a internet falhar, o loader usa a ultima copia completa em
 cache. O modelador externo nao baixa nem importa nada de outro `.pushbutton`;
 as pequenas funcoes compartilhadas vivem duplicadas em `nuvem/`.
 
+O download normal é um único arquivo ZIP da revisão pública do GitHub, extraído
+atomicamente no cache. Isso evita o limite da API pública que ocorria quando o
+loader fazia uma requisição por arquivo; em repositório público, a primeira
+execução não exige token apenas pela quantidade de arquivos.
+
 ## Senha de acesso (repositório privado — 2026-08-28)
 
 Com o repositório privado, o download exige um token do GitHub — mas o
