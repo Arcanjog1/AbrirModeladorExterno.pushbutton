@@ -9,6 +9,7 @@ from wall_capture import (
     walls_from_capture, enrich_openings_for_view, adjust_capture_opening,
     adjust_capture_openings,
     solve_capture_block_candidates, edit_capture_wall, move_capture_opening,
+    resize_capture_opening,
 )
 
 
@@ -64,6 +65,23 @@ class TestWallsFromCapture(unittest.TestCase):
         self.assertTrue(action["accepted"])
         self.assertEqual(edited["openings"][0]["center_cm"], [130.0, 0.0])
         self.assertEqual(capture["openings"][0]["center_cm"], [100, 0])
+
+    def test_redimensiona_abertura_dentro_da_parede(self):
+        capture = {
+            "walls": [{"element_id": "101", "start_cm": [0, 0], "end_cm": [200, 0],
+                       "thickness_cm": 14, "height_cm": 280, "base_z_cm": 0}],
+            "openings": [{"element_id": "201", "host_wall_id": "101", "center_cm": [100, 0],
+                          "width_cm": 80, "sill_cm": 0, "head_cm": 210}],
+        }
+
+        edited, action = resize_capture_opening(capture, "201", 120)
+
+        self.assertTrue(action["accepted"])
+        self.assertEqual(edited["openings"][0]["width_cm"], 120.0)
+        self.assertEqual(capture["openings"][0]["width_cm"], 80)
+        _unchanged, rejected = resize_capture_opening(capture, "201", 220)
+        self.assertFalse(rejected["accepted"])
+        self.assertIn("nao cabe", rejected["reason"])
 
     def test_paredes_em_sequencia_formam_uma_parede_continua(self):
         capture = {

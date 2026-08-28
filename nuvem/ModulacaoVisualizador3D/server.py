@@ -41,6 +41,8 @@ Rotas:
         da captura Revit e recalcula blocos/encontros dependentes.
     POST /api/move-opening          -> move uma abertura hospedada ao longo
         da Wall e reaplica a mesma modulação física.
+    POST /api/resize-opening        -> altera a largura de uma abertura
+        hospedada, preservando-a inteiramente dentro da Wall.
 """
 
 import json
@@ -61,7 +63,7 @@ from wall_capture import (
     walls_from_capture, enrich_openings_for_view,
     openings_for_capture_view,
     solve_capture_block_candidates, adjust_capture_opening, adjust_capture_openings,
-    edit_capture_wall, move_capture_opening,
+    edit_capture_wall, move_capture_opening, resize_capture_opening,
 )
 from modulation_preview import preview_walls
 from file_dialog import pick_dwg_file, pick_json_file, DialogError
@@ -259,6 +261,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_edit_wall()
         if parsed.path == "/api/move-opening":
             return self._handle_move_opening()
+        if parsed.path == "/api/resize-opening":
+            return self._handle_resize_opening()
 
         return self._send_json(404, {"error": "rota desconhecida"})
 
@@ -565,6 +569,27 @@ class Handler(BaseHTTPRequestHandler):
         try:
             edited, action = move_capture_opening(
                 capture, body.get("opening_id"), body.get("center_cm")
+            )
+            if not action.get("accepted"):
+                return self._send_json(409, {"edit": action})
+            return self._commit_capture_edit(model_id, edited, action, started_at)
+        except Exception as exc:
+            traceback.print_exc()
+            return self._send_json(500, {"error": str(exc)})
+
+    def _handle_resize_opening(self):
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        model_id = str(body.get("model_id") or "")
+        capture = _CAPTURE_MODELS.get(model_id)
+        if capture is None:
+            return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        started_at = time.perf_counter()
+        try:
+            edited, action = resize_capture_opening(
+                capture, body.get("opening_id"), body.get("width_cm")
             )
             if not action.get("accepted"):
                 return self._send_json(409, {"edit": action})

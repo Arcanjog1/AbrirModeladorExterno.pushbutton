@@ -25,6 +25,7 @@ FT_TO_CM = 100.0 / FEET_PER_METER
 FIRST_COURSE_Z_OFFSET_CM = 1.0
 OPENING_COURSE_BAND_TOLERANCE_CM = 0.5
 MIN_EDITABLE_WALL_LENGTH_CM = 1.0
+MIN_EDITABLE_OPENING_WIDTH_CM = 1.0
 
 
 def _xy_point(value, field_name):
@@ -880,6 +881,54 @@ def move_capture_opening(capture, opening_id, center_cm):
         "processed_source_wall_ids": _group_source_ids(
             trial, _group_keys_for_source_ids(trial, {str(axis["wall_id"])})
         ),
+    }
+
+
+def resize_capture_opening(capture, opening_id, width_cm):
+    """Altera a largura de uma abertura sem deixar seu vão sair da Wall."""
+    opening_id = str(opening_id or "")
+    source_opening = next(
+        (opening for opening in capture.get("openings") or []
+         if str(opening.get("element_id") or "") == opening_id), None,
+    )
+    if source_opening is None:
+        return capture, {"accepted": False, "reason": "abertura nao encontrada"}
+    axis = _opening_wall_axis(capture, source_opening)
+    if axis is None:
+        return capture, {"accepted": False, "reason": "parede hospedeira nao identificada"}
+    try:
+        requested_width_cm = float(width_cm)
+    except (TypeError, ValueError):
+        return capture, {"accepted": False, "reason": "largura da abertura invalida"}
+    if not math.isfinite(requested_width_cm) or requested_width_cm < MIN_EDITABLE_OPENING_WIDTH_CM:
+        return capture, {
+            "accepted": False,
+            "reason": "a abertura deve manter pelo menos {:.0f}cm de largura".format(
+                MIN_EDITABLE_OPENING_WIDTH_CM
+            ),
+        }
+    half_width_cm = requested_width_cm / 2.0
+    if (axis["opening_t_cm"] - half_width_cm < -1e-6 or
+            axis["opening_t_cm"] + half_width_cm > axis["length_cm"] + 1e-6):
+        return capture, {
+            "accepted": False,
+            "reason": "a nova largura nao cabe inteiramente na parede hospedeira",
+        }
+    trial = copy.deepcopy(capture)
+    opening = next(item for item in trial.get("openings") or []
+                   if str(item.get("element_id") or "") == opening_id)
+    opening["width_cm"] = round(requested_width_cm, 6)
+    source_ids = {str(axis["wall_id"])}
+    groups = _group_keys_for_source_ids(trial, source_ids)
+    return trial, {
+        "accepted": True,
+        "opening_id": opening_id,
+        "wall_id": axis["wall_id"],
+        "width_cm": opening["width_cm"],
+        "affected_wall_ids": _affected_wall_ids(trial, source_ids),
+        "recalculation_scope": "nivel_e_faixa_da_parede",
+        "solver_group_keys": groups,
+        "processed_source_wall_ids": _group_source_ids(trial, groups),
     }
 
 

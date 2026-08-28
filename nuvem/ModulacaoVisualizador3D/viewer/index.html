@@ -616,6 +616,7 @@ function selectObject(obj, instanceId = null) {
       + `<button type="button" data-opening-shift="-1" class="secondary">Mover -1cm</button> `
       + `<button type="button" data-opening-shift="1" class="secondary">Mover +1cm</button>`
       + (currentModelId ? ` <button type="button" data-opening-edit="move" class="secondary">Arrastar abertura</button>` : '')
+      + (currentModelId ? ` <button type="button" data-opening-resize class="secondary">Alterar largura</button>` : '')
       + `</div>`;
   } else if (obj.userData.kind === 'block-instances') {
     const entry = obj.userData.instances[instanceId];
@@ -691,6 +692,31 @@ function beginOpeningEdit() {
   if (!opening || !currentModelId) return;
   editSession = { kind: 'opening', opening, pointerStart: null };
   setStatus('Arraste no modelo para mover a abertura ao longo da parede. A modulação será recalculada ao soltar.');
+}
+
+async function resizeSelectedOpening() {
+  const opening = currentOpenings.find(item => String(item.element_id || '') === selectedOpeningId);
+  if (!opening || !currentModelId) return;
+  const value = window.prompt('Nova largura da abertura (cm):', String(opening.width_cm || ''));
+  if (value === null) return;
+  const width = Number(value.replace(',', '.'));
+  if (!Number.isFinite(width)) { setStatus('Informe uma largura numérica em centímetros.', true); return; }
+  setStatus('Validando nova largura e recalculando a modulação...');
+  try {
+    const response = await fetch('/api/resize-opening', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_id: currentModelId, opening_id: opening.element_id, width_cm: width }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setStatus((data.edit && data.edit.reason) || data.error || 'A largura foi rejeitada.', true);
+      return;
+    }
+    renderModulationData(data, { edit: data.edit });
+    setStatus(`Largura da abertura atualizada para ${data.edit.width_cm}cm; modulação recalculada.`);
+  } catch (error) {
+    setStatus('Falha ao atualizar a largura: ' + error, true);
+  }
 }
 
 async function commitInteractiveEdit(session, point) {
@@ -1168,6 +1194,10 @@ document.getElementById('selection-panel').addEventListener('click', (event) => 
   const openingEditButton = event.target.closest('[data-opening-edit]');
   if (openingEditButton) {
     beginOpeningEdit();
+    return;
+  }
+  if (event.target.closest('[data-opening-resize]')) {
+    resizeSelectedOpening();
     return;
   }
   const button = event.target.closest('[data-opening-shift]');
