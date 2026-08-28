@@ -124,6 +124,10 @@ do arquivo DXF".
 - Calculadora manual: recebe comprimento, amarrações nas duas pontas, fiada
   e prioridade; enumera e classifica alternativas usando juntas reais e o
   catálogo carregado. Também aceita uma lista JSON de Walls independentes.
+- Motor completo do modelo: com uma captura de Walls carregada, o botão
+  **Recalcular modelo com motor completo** chama o mesmo solver canônico da
+  modulação inicial. Ele apresenta setores, dependências L/T/X, validações e
+  regiões sem solução; a calculadora manual não substitui esse fluxo.
 
 ## Fluxos e limites
 
@@ -145,6 +149,9 @@ do arquivo DXF".
   foi fornecida. A otimização global só será habilitada quando receber o
   grafo de encontros do projeto — não trata paredes isoladas como se fossem
   uma solução global validada.
+- Durante o arraste de Wall ou abertura há prévia com debounce; ela calcula
+  somente as faixas de nível/base afetadas e não persiste nada. Ao soltar, o
+  mesmo solver recalcula e valida a edição antes de atualizar o modelo.
 
 ## Testes
 

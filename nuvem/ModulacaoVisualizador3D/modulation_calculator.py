@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Calculadora manual de modulação, sem dependência da interface.
+"""Fachada de cálculo para a modulação no modelador externo.
 
-O solver de edifícios (``wall_stepper``) continua sendo a fonte de verdade
-quando há geometria completa de Walls/encontros. Este módulo atende ao caso
-manual: recebe o comprimento e as condições declaradas nas duas pontas,
-transforma as amarrações em peças obrigatórias conhecidas e enumera somente
-preenchimentos que fecham com as juntas do motor.
+``calculate_capture_solutions`` é a entrada principal: chama o mesmo
+``core.engine.wall_stepper.solve_building_blocks`` usado para a modulação
+inicial e para toda edição interativa. Ela recebe a geometria completa,
+aberturas, bandas de fiada, níveis e o grafo L/T/X; portanto não duplica
+regras no visualizador.
 
-Ele não inventa uma subtração de comprimento. Um T sem o papel geométrico da
-parede, por exemplo, devolve as duas interpretações permitidas (principal e
-boneca), marcadas como hipótese para o usuário escolher; para uma solução
-definitiva de L/T/X use a captura do projeto, que chama ``wall_stepper``.
+O cálculo manual continua disponível apenas como explorador sem geometria.
+Ele nunca se apresenta como solução global ou substituto do solver do modelo.
 """
 
 from __future__ import division
@@ -36,6 +34,111 @@ L_TIES = set(("L", "QUINA", "CORNER", "ENCONTRO_L"))
 X_TIES = set(("X", "CRUZ", "CRUZAMENTO", "X_INTERSECTION"))
 T_TIES = set(("T", "ENCONTRO_T", "T_INTERSECTION"))
 MAX_ENUMERATED_LAYOUTS = 5000
+
+
+def _capture_dependency_graph(capture):
+    """Expõe o mesmo grafo de encontros usado pelo solver, para diagnóstico/UI."""
+    from wall_capture import _capture_graph_for_raw, _capture_wall_groups, _raw_wall_ids
+
+    nodes_result, edges, components = [], set(), []
+    for group_key, raw_walls, openings in _capture_wall_groups(capture):
+        _graph, raw_by_tuple, _openings, _junctions, nodes, _end_nodes, _skipped = (
+            _capture_graph_for_raw(raw_walls, openings)
+        )
+        adjacency = {}
+        for node_index, node in enumerate(nodes):
+            wall_ids = []
+            for wall_index, _end in (node.get("arms") or []):
+                if 0 <= wall_index < len(raw_by_tuple):
+                    wall_ids.extend(_raw_wall_ids(raw_by_tuple[wall_index]))
+            for wall_index in (node.get("crossing_walls") or []):
+                if 0 <= wall_index < len(raw_by_tuple):
+                    wall_ids.extend(_raw_wall_ids(raw_by_tuple[wall_index]))
+            wall_ids = sorted(set(str(value) for value in wall_ids if str(value)))
+            if not wall_ids:
+                continue
+            nodes_result.append({
+                "id": "{}:{}".format(group_key[0], node_index),
+                "kind": node.get("kind") or "AMBIGUOUS",
+                "wall_ids": wall_ids,
+                "solver_group_key": [group_key[0], group_key[1]],
+            })
+            for wall_id in wall_ids:
+                adjacency.setdefault(wall_id, set()).update(set(wall_ids) - {wall_id})
+            for first_index, first in enumerate(wall_ids):
+                for second in wall_ids[first_index + 1:]:
+                    edges.add(tuple(sorted((first, second))))
+        visited = set()
+        for source in sorted(adjacency):
+            if source in visited:
+                continue
+            pending, component = [source], []
+            visited.add(source)
+            while pending:
+                current = pending.pop()
+                component.append(current)
+                for neighbor in adjacency.get(current, ()):
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        pending.append(neighbor)
+            components.append(sorted(component))
+    return {
+        "nodes": nodes_result,
+        "edges": [{"from": first, "to": second} for first, second in sorted(edges)],
+        "components": components,
+    }
+
+
+def calculate_capture_solutions(capture, group_keys=None):
+    """Resolve uma captura completa exclusivamente pelo motor canônico.
+
+    Os ``group_keys`` são faixas independentes ``(nível, base_z)`` e permitem
+    que a edição interativa peça apenas a região necessária.  Encontros e
+    paredes conectadas dentro da faixa continuam no mesmo solve, evitando
+    aplicar uma combinação local contra uma amarração antiga.
+    """
+    from wall_capture import solve_capture_block_candidates, walls_from_capture
+
+    candidates, diagnostics = solve_capture_block_candidates(capture, group_keys=group_keys)
+    walls, _wall_diagnostics = walls_from_capture(capture)
+    sectors = []
+    for wall in walls:
+        sectors.append({
+            "wall_id": wall.get("id"),
+            "source_wall_ids": wall.get("source_wall_ids") or [],
+            "junctions": wall.get("junctions") or [],
+            "opening_count": wall.get("openings_count") or 0,
+            "segments": wall.get("cutout_segments") or [],
+        })
+    failures = []
+    for status in diagnostics.get("wall_statuses") or []:
+        if not status.get("ok"):
+            failures.append({
+                "wall_id": status.get("wall_id"),
+                "code": status.get("code"),
+                "reason": status.get("reason"),
+            })
+    return {
+        "ok": diagnostics.get("status") == "ok",
+        "mode": "capture_solver",
+        "source_of_truth": "core.engine.wall_stepper.solve_building_blocks",
+        "recalculation_scope": "all_groups" if group_keys is None else "affected_groups",
+        "processed_group_keys": diagnostics.get("processed_group_keys") or [],
+        "selected_solution": {
+            "block_count": len(candidates),
+            "blocks": candidates,
+            "wall_statuses": diagnostics.get("wall_statuses") or [],
+        },
+        "sectors": sectors,
+        "dependency_graph": _capture_dependency_graph(capture),
+        "validation": diagnostics,
+        "unresolved_regions": failures,
+        "note": (
+            "Resultado calculado pelo solver completo do projeto: catálogo, fiadas, "
+            "aberturas, pilaretes, amarrações L/T/X, níveis e validações são avaliados "
+            "na mesma execução."
+        ),
+    }
 
 
 def _norm_tie(value):

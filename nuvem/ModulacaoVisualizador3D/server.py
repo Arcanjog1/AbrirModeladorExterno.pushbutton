@@ -72,7 +72,9 @@ from file_dialog import pick_dwg_file, pick_json_file, DialogError
 from oda_converter import convert_dwg_to_dxf, OdaNotFoundError, OdaConversionError
 from layer_matcher import analyze_layers
 from wall_validation import validate_walls
-from modulation_calculator import calculate_project_solutions, calculate_wall_solutions
+from modulation_calculator import (
+    calculate_capture_solutions, calculate_project_solutions, calculate_wall_solutions,
+)
 
 VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 _LOAD_CACHE = OrderedDict()
@@ -484,14 +486,8 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             return self._send_json(500, {"error": str(exc)})
 
-    def _commit_capture_edit(self, model_id, capture, action, started_at):
-        """Recalcula a mesma modulação completa usada na carga inicial.
-
-        O motor já separa o cálculo por nível/faixa de base. O metadado de
-        escopo devolvido na ação mostra quais Walls conectadas foram afetadas;
-        assim a UI atualiza a região dependente sem inventar uma segunda
-        regra simplificada para o arraste.
-        """
+    def _recalculate_capture_edit(self, model_id, capture, action):
+        """Executa só as faixas alteradas e preserva candidatos independentes."""
         groups = action.get("solver_group_keys") or []
         previous_solution = _CAPTURE_SOLUTIONS.get(model_id)
         if previous_solution is not None and groups:
@@ -521,8 +517,31 @@ class Handler(BaseHTTPRequestHandler):
                 "processed_group_keys": changed_diagnostics.get("processed_group_keys") or groups,
                 "partial_recalculation": True,
             })
-        else:
-            candidates, diagnostics = solve_capture_block_candidates(capture)
+            return candidates, diagnostics
+        return solve_capture_block_candidates(capture)
+
+    def _preview_capture_edit(self, model_id, capture, action, started_at):
+        """Prévia efêmera: calcula, renderiza e nunca altera o modelo salvo."""
+        candidates, diagnostics = self._recalculate_capture_edit(model_id, capture, action)
+        payload = _capture_view_payload(capture, candidates, diagnostics)
+        payload["model_id"] = model_id
+        payload["edit"] = action
+        payload["preview"] = True
+        payload["performance_ms"] = {
+            "total": round((time.perf_counter() - started_at) * 1000.0, 1),
+            "cache_hit": False,
+        }
+        return self._send_json(200, payload)
+
+    def _commit_capture_edit(self, model_id, capture, action, started_at):
+        """Recalcula a mesma modulação completa usada na carga inicial.
+
+        O motor já separa o cálculo por nível/faixa de base. O metadado de
+        escopo devolvido na ação mostra quais Walls conectadas foram afetadas;
+        assim a UI atualiza a região dependente sem inventar uma segunda
+        regra simplificada para o arraste.
+        """
+        candidates, diagnostics = self._recalculate_capture_edit(model_id, capture, action)
         payload = _capture_view_payload(capture, candidates, diagnostics)
         payload["model_id"] = model_id
         payload["edit"] = action
@@ -556,6 +575,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             if not action.get("accepted"):
                 return self._send_json(409, {"edit": action})
+            if body.get("preview"):
+                return self._preview_capture_edit(model_id, edited, action, started_at)
             return self._commit_capture_edit(model_id, edited, action, started_at)
         except Exception as exc:
             traceback.print_exc()
@@ -577,6 +598,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             if not action.get("accepted"):
                 return self._send_json(409, {"edit": action})
+            if body.get("preview"):
+                return self._preview_capture_edit(model_id, edited, action, started_at)
             return self._commit_capture_edit(model_id, edited, action, started_at)
         except Exception as exc:
             traceback.print_exc()
@@ -598,6 +621,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             if not action.get("accepted"):
                 return self._send_json(409, {"edit": action})
+            if body.get("preview"):
+                return self._preview_capture_edit(model_id, edited, action, started_at)
             return self._commit_capture_edit(model_id, edited, action, started_at)
         except Exception as exc:
             traceback.print_exc()
@@ -612,7 +637,9 @@ class Handler(BaseHTTPRequestHandler):
             model_id = str(body.get("model_id") or "")
             model = _CAPTURE_MODELS.get(model_id) if model_id else None
             catalog = (model or {}).get("catalog") if model else body.get("catalog")
-            if body.get("walls") is not None:
+            if model is not None and body.get("solver_mode") == "model":
+                result = calculate_capture_solutions(model, body.get("group_keys"))
+            elif body.get("walls") is not None:
                 result = calculate_project_solutions(body, catalog=catalog)
             else:
                 result = calculate_wall_solutions(body, catalog=catalog)

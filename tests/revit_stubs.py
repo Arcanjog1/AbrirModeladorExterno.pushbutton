@@ -283,15 +283,47 @@ class _FakeFamilyInstance(object):
         _FakeFamilyInstance._next_int[0] += 1
 
 
+class _FakeOpening(object):
+    """Devolvido por _StubCreate.NewOpening - duble do elemento `Opening`
+    (Abertura de Parede) que o Revit cria ao recortar uma parede continua
+    (ver create_wall_opening_cuts / WALL_BUILD_MODE_CONTINUOUS). Guarda a
+    parede hospedeira e os dois cantos pedidos para o teste conferir
+    posicao/largura/altura do recorte.
+
+    `Location` e' de proposito um objeto qualquer (NAO um LocationCurve):
+    e' assim que apply_axis_opening_fix distingue um recorte de um trecho
+    de parede de verga/peitoril."""
+    _next_int = [5000]
+
+    def __init__(self, wall, p1, p2):
+        self.Id = ElementId(_FakeOpening._next_int[0])
+        _FakeOpening._next_int[0] += 1
+        self.Host = wall
+        self.p1 = p1
+        self.p2 = p2
+        self.Location = _Inert()
+        self.IsValidObject = True
+
+
 class _StubCreate(object):
-    """Duble de `Document.Create` - so' o metodo que create_building_blocks
-    realmente chama (NewFamilyInstance), para poder exercitar essa funcao
-    de ponta a ponta nos testes offline (ver test_create_building_blocks_*
-    em test_script.py) em vez de so' mockar `_create_building_blocks`
-    inteira como o resto da suite faz."""
+    """Duble de `Document.Create` - so' os metodos que o motor realmente
+    chama (NewFamilyInstance, para create_building_blocks; NewOpening, para
+    os recortes do modo de parede continua), para poder exercitar essas
+    funcoes de ponta a ponta nos testes offline (ver
+    test_create_building_blocks_* / test_recortes_* em test_script.py) em
+    vez de so' mockar a funcao inteira como o resto da suite faz."""
+
+    def __init__(self):
+        # Todo NewOpening pedido, em ordem: (wall, p1, p2) - o teste confere
+        # os cantos enviados sem precisar de um Revit real.
+        self.openings = []
 
     def NewFamilyInstance(self, point, symbol, level, structural_type):
         return _FakeFamilyInstance()
+
+    def NewOpening(self, wall, p1, p2):
+        self.openings.append((wall, p1, p2))
+        return _FakeOpening(wall, p1, p2)
 
 
 class _StubDoc(object):
@@ -359,9 +391,12 @@ class _StubElementTransformUtils(object):
     offline. Registrando as chamadas da' para testar de fora do Revit o
     que ate' entao so' dava para conferir ao vivo: QUAIS pecas rotacionam,
     em torno de que eixo e por que angulo, e quais espelham em que plano.
-    Metodos nao declarados aqui (MoveElement, CopyElement, ...) continuam
-    estourando AttributeError como antes - de proposito, para nao mudar em
-    silencio o comportamento de nenhum outro teste ja existente.
+    MoveElement entrou na mesma logica (2026-08-28): sem ele, o caminho de
+    apply_axis_opening_fix que translada um RECORTE de parede continua (ver
+    WALL_BUILD_MODE_CONTINUOUS) so' daria para conferir ao vivo no Revit.
+    Metodos nao declarados aqui (CopyElement, ...) continuam estourando
+    AttributeError como antes - de proposito, para nao mudar em silencio o
+    comportamento de nenhum outro teste ja existente.
 
     NAO substitui conferencia no Revit real (o duble nao move nada de
     verdade) - ver tests/README.md."""
@@ -374,6 +409,9 @@ class _StubElementTransformUtils(object):
 
     def MirrorElement(self, document, element_id, plane):
         self.calls.append(("mirror", element_id, plane))
+
+    def MoveElement(self, document, element_id, translation):
+        self.calls.append(("move", element_id, translation))
 
 
 class _StubTransaction(object):

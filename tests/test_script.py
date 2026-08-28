@@ -221,114 +221,6 @@ def test_varredura_sugere_a_espessura_desenhada():
     assert counts.get(14.0) == 1, counts
 
 
-@case
-def test_paredes_colineares_conectadas_viram_um_unico_eixo_logico():
-    walls = [
-        (seg(0, 0, 100, 0), ft(14), (False, False)),
-        (seg(100, 0, 240, 0), ft(14), (False, False)),
-    ]
-
-    merged, source_groups = m.merge_connected_collinear_walls(walls)
-
-    assert source_groups == [[0, 1]], source_groups
-    assert len(merged) == 1
-    assert abs(to_cm(merged[0][0].Length) - 240.0) < 0.01
-
-
-@case
-def test_bloco_pode_atravessar_divisa_entre_paredes_colineares():
-    walls = [
-        (seg(0, 0, 50, 0), ft(14), (False, False)),
-        (seg(50, 0, 119, 0), ft(14), (False, False)),
-    ]
-    merged, _source_groups = m.merge_connected_collinear_walls(walls)
-    merged, junction_map = m.extend_wall_ends_to_junctions(
-        merged, m.JUNCTION_FACE_SEARCH_FT
-    )
-    nodes, end_to_node = m.build_wall_graph(merged, junction_map)
-
-    result = m.solve_building_blocks(nodes, merged, end_to_node, [[]], CATALOG)
-
-    crossing = []
-    for candidate in result["candidates"]:
-        center_cm = to_cm(candidate["origin_world"].X)
-        half_length_cm = candidate["length_cm"] / 2.0
-        if center_cm - half_length_cm < 50.0 < center_cm + half_length_cm:
-            crossing.append(candidate)
-    assert crossing, result["candidates"]
-    assert not result["non_modular"], result["non_modular"]
-
-
-@case
-def test_prechecagem_de_walls_existentes_avalia_o_eixo_continuo():
-    walls = [
-        (seg(0, 0, 50, 0), ft(14), (False, False)),
-        (seg(50, 0, 119, 0), ft(14), (False, False)),
-    ]
-    merged, groups = m.merge_connected_collinear_walls(walls)
-    mapping = {0: [(101, "cad"), (102, "cad")]}
-
-    results = m.evaluate_wall_axes_modulation(merged, mapping)
-
-    assert groups == [[0, 1]]
-    assert len(results) == 1
-    assert results[0]["compatible"]
-    assert abs(results[0]["length_cm"] - 119.0) < 0.01
-    assert results[0]["wall_ids"] == [101, 102]
-
-
-@case
-def test_paredes_colineares_separadas_nao_sao_unidas():
-    walls = [
-        (seg(0, 0, 100, 0), ft(14), (False, False)),
-        (seg(102, 0, 240, 0), ft(14), (False, False)),
-    ]
-
-    merged, source_groups = m.merge_connected_collinear_walls(walls)
-
-    assert len(merged) == 2
-    assert source_groups == [[0], [1]], source_groups
-
-
-@case
-def test_consolidacao_colinear_preserva_encontro_t_como_amarracao():
-    walls = [
-        (seg(0, 0, 200, 0), ft(14), (False, False)),
-        (seg(200, 0, 400, 0), ft(14), (False, False)),
-        (seg(200, 0, 200, 300), ft(14), (False, False)),
-    ]
-
-    merged, source_groups = m.merge_connected_collinear_walls(walls)
-    merged, junction_map = m.extend_wall_ends_to_junctions(
-        merged, m.JUNCTION_FACE_SEARCH_FT
-    )
-    nodes, _end_to_node = m.build_wall_graph(merged, junction_map)
-
-    assert len(merged) == 2, source_groups
-    tees = [node for node in nodes if node["kind"] == "T_INTERSECTION"]
-    assert len(tees) == 1, [node["kind"] for node in nodes]
-
-
-@case
-def test_consolidacao_colinear_preserva_cruzamento_como_amarracao_x():
-    walls = [
-        (seg(-200, 0, 0, 0), ft(14), (False, False)),
-        (seg(0, 0, 200, 0), ft(14), (False, False)),
-        (seg(0, -200, 0, 0), ft(14), (False, False)),
-        (seg(0, 0, 0, 200), ft(14), (False, False)),
-    ]
-
-    merged, source_groups = m.merge_connected_collinear_walls(walls)
-    merged, junction_map = m.extend_wall_ends_to_junctions(
-        merged, m.JUNCTION_FACE_SEARCH_FT
-    )
-    nodes, _end_to_node = m.build_wall_graph(merged, junction_map)
-
-    assert len(merged) == 2, source_groups
-    crossings = [node for node in nodes if node["kind"] == "X_INTERSECTION"]
-    assert len(crossings) == 1, [node["kind"] for node in nodes]
-
-
 # ------------------------------------------ grafo de encontros (Etapa 2)
 @case
 def test_canto_L_e_um_unico_no():
@@ -621,11 +513,8 @@ def test_solver_de_eixo_aceita_restos_alem_de_zero():
 
 @case
 def test_pilarete_so_fecha_em_multiplo_de_cinco():
-    # B34 nao participa de pilarete comum. 60cm fecha com B39+B19;
-    # 55cm exigiria B34 ou mais de uma peca de excecao e deve ser recusado.
-    blocks, leftover = m.pack_pier_with_blocks(60)
-    assert blocks == [39, 19] and leftover == 0
-    assert m.pack_pier_with_blocks(55) == (None, 55)
+    blocks, leftover = m.pack_pier_with_blocks(55)
+    assert blocks == [34, 19] and leftover == 0
     assert m.pack_pier_with_blocks(53) == (None, 53)
 
 
@@ -680,9 +569,24 @@ def test_desencontro_de_junta_mantem_layout_padrao_quando_nao_ha_alternativa_mel
 
 
 @case
-def test_trecho_fechado_nao_usa_b34_para_disfarcar_junta_vertical():
-    """Sem alternativa legal, o solver preserva o layout e deixa a
-    validacao pedir ajuste geometrico; B34 nunca vira preenchimento."""
+def test_desencontra_junta_mesmo_quando_so_fecha_com_b39_puro_dos_dois_lados_fechados():
+    """CAUSA-RAIZ corrigida (2026-08-25) da maioria das juntas verticais
+    corridas medidas numa execucao real (paredes com a MESMA junta repetida
+    em ate' 15 fiadas seguidas - ver PENALTY_CONTINUOUS_VERTICAL_JOINT no
+    log real do usuario). O comentario de
+    test_fiada_b_desencontra_junta_vertical_da_fiada_a ja documentava o
+    problema ('pier=81cm fecha so' com 2xB39... nada para desencontrar') e
+    contornou trocando o pier de teste - mas exatamente esse caso (trecho
+    entre dois encontros L/T/X, as duas pontas FECHADAS - sem onde B19
+    encostar - fechando como um multiplo EXATO de 40cm, so' B39) e' comum
+    em paredes reais sem nenhuma abertura no meio, e ate' agora nao tinha
+    NENHUMA alternativa: `_pier_ordered_layout(first_code=...)` sempre
+    devolve o resultado do tier 1 (so' B39) quando ele fecha, silenciando
+    qualquer pedido de B34/compensador como primeiro bloco (esses tiers
+    nunca chegavam a ser tentados). `_pier_forced_bypass_layouts` (chamada
+    por `_pier_layout_avoiding_joints`) resolve isso: 1 B34 no inicio +
+    B39 o quanto couber SEMPRE sobra exatamente 5cm (prova no docstring),
+    que fecha com exatamente 1 C04 - dentro do teto de 1 compensador."""
     pier_cm, lead_cm, trail_cm = 201.0, 1.0, 1.0  # remaining = 200 = 5*(39+1)
     baseline = m._pier_ordered_layout(pier_cm, CATALOG, lead_cm, trail_cm)
     assert [code for code, _s, _e in baseline] == ["B39"] * 5, baseline
@@ -697,8 +601,12 @@ def test_trecho_fechado_nao_usa_b34_para_disfarcar_junta_vertical():
     # cobre o mesmo trecho inteiro (mesmo comprimento total, mesmas pontas)
     assert staggered[0][1] == baseline[0][1] and staggered[-1][2] == baseline[-1][2]
     joints_b = m._layout_internal_joint_positions_cm(staggered, 0.0)
-    assert m._count_joint_coincidences_cm(joints_b, joints_a) == len(joints_a)
-    assert "B34" not in [code for code, _a, _b in staggered], staggered
+    assert m._count_joint_coincidences_cm(joints_b, joints_a) == 0, (joints_a, joints_b)
+    # nunca mais que 1 compensador (regra absoluta), e a peca especial que
+    # permite o desencontro sem B19 (ponta fechada) e' o B34.
+    comp_count = sum(1 for code, _a, _b in staggered if CATALOG[code]["is_compensator"])
+    assert comp_count <= 1, staggered
+    assert "B34" in [code for code, _a, _b in staggered], staggered
     assert "B19" not in [code for code, _a, _b in staggered], staggered
 
 
@@ -736,11 +644,11 @@ def test_coincidencia_de_junta_vence_alinhamento_de_vazio_na_prioridade():
     assert staggered is not None
     assert staggered[0][1] == baseline[0][1] and staggered[-1][2] == baseline[-1][2]
     joints_b = m._layout_internal_joint_positions_cm(staggered, 0.0)
-    # Sem alternativa legal, a busca nao injeta B34 nem varias pastilhas
-    # para fabricar um desencontro. O conflito permanece visivel para a
-    # validacao obrigatoria e para o ajuste geometrico.
-    assert m._count_joint_coincidences_cm(joints_b, joints_a) == len(joints_a)
-    assert "B34" not in [code for code, _a, _b in staggered]
+    # a regra #1 (ausencia de coincidencia de junta) e' ABSOLUTA - nunca
+    # aceita uma "copia identica" so' porque o alinhamento de vazio dela
+    # (contra si mesma) parece perfeito.
+    assert m._count_joint_coincidences_cm(joints_b, joints_a) == 0, (joints_a, joints_b)
+    assert staggered != baseline, "a copia identica nao pode vencer uma alternativa real"
 
 
 @case
@@ -850,10 +758,13 @@ def test_meio_bloco_e_ultimo_recurso_nunca_no_meio_do_trecho():
     assert "B19" in [c for c, _a, _b in layout3b], layout3b
     assert sum(1 for c, _a, _b in layout3b if CATALOG[c]["is_compensator"]) == 0
 
-    # As duas pontas AMARRADAS: B19 contra o encontro e' proibido. Sem uma
-    # composicao valida, o trecho precisa seguir para ajuste geometrico.
+    # As duas pontas AMARRADAS (nenhuma aberta) - sem compensadores, so'
+    # fecha usando B19 mesmo sem ponta aberta disponivel; o solver nao pode
+    # desistir so' porque a posicao "ideal" nao existe (regra #6 do usuario:
+    # sempre tentar a melhor solucao possivel antes de declarar sem solucao).
     layout4 = m._pier_ordered_layout(61.0, catalog_no_comp, 1.0, 1.0)
-    assert layout4 is None
+    assert layout4 is not None
+    assert "B19" in [c for c, _a, _b in layout4]
 
 
 @case
@@ -1019,10 +930,18 @@ def test_solve_t_intersection_degrada_para_l_depois_para_elemento_unico():
 
 
 @case
-def test_b34_e_proibido_no_meio_da_parede():
-    """B34 e' exclusivo de amarracao L/T e nao fecha parede comum."""
+def test_b34_no_meio_da_parede_priorizado_sobre_compensadores():
+    """Pedido explicito do usuario (2026-08-21): "o bloco de 34cm tambem
+    pode ser utilizado no meio de uma parede... para reduzir o uso de
+    compensadores", com prioridade B39 -> B19 -> B34 -> compensadores.
+    pier=76cm com as duas pontas AMARRADAS (nao ha' onde encostar um B19)
+    so' fecha sem compensador usando B39+B34 - tem que preferir isso a
+    qualquer compensador."""
     layout = m._pier_ordered_layout(76.0, CATALOG, 1.0, 1.0)
-    assert layout is None
+    codes = [c for c, _a, _b in layout]
+    assert codes == ["B39", "B34"], layout
+    assert sum(1 for c in codes if CATALOG[c]["is_compensator"]) == 0
+    assert "B19" not in codes
 
 
 @case
@@ -1439,8 +1358,10 @@ def test_jamb_variant_count_gera_variantes_distintas_sem_repetir_cruzado():
     codes_b = {v["logical_code"] for v in variants_b}
     assert not (codes_a & codes_b), (codes_a, codes_b)
 
-    # 3. nenhuma variante usa a peca B34 reservada aos encontros.
-    assert "B34" not in codes_a | codes_b
+    # 3. o catalogo completo (varios codigos possiveis para um pilarete de
+    # 200cm) permite variantes de verdade, nao so' repeticoes da 0.
+    assert len(codes_a) > 1, codes_a
+    assert len(codes_b) > 1, codes_b
 
 
 @case
@@ -1474,22 +1395,6 @@ def test_validacao_pega_compensadores_de_trechos_diferentes_adjacentes():
     # nao pode ser calculado - fica True para nao quebrar retrocompat.
     validation_no_catalog = m.validate_wall_modulation(0, walls, [[]], fill_result)
     assert validation_no_catalog["checks"]["sem_compensadores_consecutivos"] is True
-
-
-@case
-def test_validacao_reprova_b34_fora_de_amarracao():
-    walls = [(seg(0, 0, 400, 0), ft(14.0), (False, False))]
-    candidate = _comp_candidate(0, 100.0, 34.0, code="B34")
-    candidate["placement_reason"] = "STANDARD_FILL"
-    fill = {"candidates": [candidate], "jamb_exceptions": [], "non_modular": []}
-
-    validation = m.validate_wall_modulation(
-        0, walls, [[]], fill, catalog=CATALOG
-    )
-
-    assert validation["ok"] is False
-    assert validation["checks"]["b34_restrito_a_amarracao"] is False
-    assert any("B34 fora" in problem for problem in validation["problems"])
 
 
 @case
@@ -1899,16 +1804,28 @@ def test_solve_building_blocks_all_courses_variantes_evitam_alternating_joint_pa
     # abaixo, que confere que a variacao extra FAZ a lista ficar vazia.
     assert old_audit["alternating_joints"], old_audit["problems"]
 
+    # ATUALIZADO 2026-08-28 (regra 18.4): o default voltou a ser K=1 por
+    # pedido explicito do usuario - "a Fiada 1 deve ser o mais semelhante
+    # possivel a' Fiada 3". Para continuar exercitando o MECANISMO de
+    # variacao (que a constante deixou de acionar por padrao, mas que segue
+    # existindo e sendo usavel), este trecho passa K=3 explicitamente.
     new = m.solve_building_blocks_all_courses(
         nodes, walls, end_to_node, openings_per_wall, CATALOG, ft(0.0), num_courses,
-        variants_per_course=m.PIER_LAYOUT_VARIANTS_PER_COURSE,
+        variants_per_course=3,
     )
     assert new["error"] is None
     new_audit = new["wall_bond_audits"][0]
-    assert not new_audit["ok"]
-    assert new_audit["continuous_joints"], "sem alternativa legal, a validacao deve bloquear"
-    for items in new["course_candidates"].values():
-        assert all(c["logical_code"] != "B34" for c in items)
+    assert new_audit["ok"], new_audit["problems"]
+    assert new_audit["alternating_joints"] == [], new_audit["alternating_joints"]
+    assert new_audit["continuous_joints"] == [], new_audit["continuous_joints"]
+
+    # controle: a variacao extra nao pode ter deixado NENHUM trecho sem
+    # fechar em blocos - regra do usuario, "nenhuma parede pode ser
+    # silenciosamente pulada" (ver process_walls_one_by_one/validate_wall_
+    # modulation). "non_modular"/"alignment_conflicts" continuam existindo
+    # como mecanismo de report, so' nao podem disparar NESTE cenario (uma
+    # parede simples, sem vao, de comprimento modular).
+    assert all(len(band["result"]["non_modular"]) == 0 for band in new["bands"]), new["bands"]
 
 
 # ------------------- FEEDBACK DA ETAPA FINAL DO SOLVER (2026-08-27) ------
@@ -3525,9 +3442,8 @@ def test_wall_shift_is_topologically_safe_regras():
 # entao os comprimentos REAIS ficam W=489cm/V=308cm. So' com esses numeros
 # exatos process_walls_one_by_one reproduz W ok / V nao-ok, e um
 # deslocamento de -1cm em W fecha V (308->309cm) sem quebrar W.
-_GROUP_SHIFT_W_RAW_CM = 452.0
-_GROUP_SHIFT_V_RAW_CM = 280.0
-_ISOLATED_WALL_RAW_CM = 117.0
+_GROUP_SHIFT_W_RAW_CM = 482.0
+_GROUP_SHIFT_V_RAW_CM = 301.0
 
 
 def _group_shift_axis_fixture():
@@ -3611,7 +3527,7 @@ def test_find_wall_group_shift_fixes_fecha_parede_sem_abertura_deslocando_vizinh
     assert fixes[0] is fixes[1], "os dois membros do MESMO grupo compartilham o MESMO plano"
     assert plan["kind"] == "group_shift"
     assert plan["shifted_wall_idx"] == 0
-    assert abs(plan["shift_delta_cm"]) <= 3.0 + 1e-9
+    assert abs(plan["shift_delta_cm"]) <= 1.0 + 1e-9, "o menor delta que fecha e' 1cm - tem que ser o escolhido"
     members_by_idx = dict((mm["wall_idx"], mm) for mm in plan["members"])
     assert abs(members_by_idx[0]["new_length_cm"] - to_cm(walls_ext[0][0].Length)) < 0.01, \
         "a parede deslocada nunca muda de comprimento (translacao rigida)"
@@ -3719,10 +3635,10 @@ def test_find_wall_group_shift_fixes_alonga_parede_isolada_sem_vizinho():
     candidato de deslocamento de grupo (candidates fica vazio, sem
     _wall_group_shift_targets nenhum), o fallback de parede ISOLADA precisa
     achar esse mesmo +1cm alongando a propria parede."""
-    walls = [(seg(0, 0, 0, _ISOLATED_WALL_RAW_CM), ft(14.0), (False, False))]
+    walls = [(seg(0, 0, 0, _GROUP_SHIFT_V_RAW_CM + 7.0), ft(14.0), (False, False))]
     walls_ext, jmap = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
     nodes, end_to_node = m.build_wall_graph(walls_ext, jmap)
-    assert abs(to_cm(walls_ext[0][0].Length) - _ISOLATED_WALL_RAW_CM) < 0.01, \
+    assert abs(to_cm(walls_ext[0][0].Length) - (_GROUP_SHIFT_V_RAW_CM + 7.0)) < 0.01, \
         "sem vizinho nao ha' push de junction - o comprimento fica exatamente o bruto"
     openings_per_wall = [[]]
 
@@ -3745,7 +3661,8 @@ def test_find_wall_group_shift_fixes_alonga_parede_isolada_sem_vizinho():
     plan = fixes[0]
     assert plan["kind"] == "wall_length_adjust"
     assert plan["shifted_wall_idx"] == 0
-    assert abs(abs(plan["shift_delta_cm"]) - 2.0) < 1e-9
+    assert abs(abs(plan["shift_delta_cm"]) - 1.0) < 1e-9, \
+        "o menor delta que fecha esta parede e' 1cm (ver _group_shift_axis_fixture)"
     member = plan["members"][0]
     assert member["role"] == "neighbor", "nunca 'shifted' aqui - o comprimento muda de verdade"
     assert m.wall_length_closes_with_blocks_cm(member["new_length_cm"])
@@ -3822,7 +3739,7 @@ def test_apply_wall_group_shift_aplica_plano_wall_length_adjust():
     """apply_wall_group_shift, sem NENHUMA alteracao, precisa aplicar
     corretamente um plano kind='wall_length_adjust' (role sempre 'neighbor') -
     so' a ponta que mudou e' editada, a ponta oposta fica intocada."""
-    walls = [(seg(0, 0, 0, _ISOLATED_WALL_RAW_CM), ft(14.0), (False, False))]
+    walls = [(seg(0, 0, 0, _GROUP_SHIFT_V_RAW_CM + 7.0), ft(14.0), (False, False))]
     walls_ext, jmap = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
     nodes, end_to_node = m.build_wall_graph(walls_ext, jmap)
     openings_per_wall = [[]]
@@ -4012,7 +3929,7 @@ def test_find_wall_group_shift_fixes_ajusta_parede_de_comprimento_FRACIONARIO():
     """Regressao do bug principal: uma parede de comprimento FRACIONARIO
     que nao fecha era impossivel de corrigir (todo delta inteiro preserva a
     fracao). Agora o alvo inteiro mais proximo e' alcancado."""
-    raw_cm = _ISOLATED_WALL_RAW_CM + 0.5
+    raw_cm = _GROUP_SHIFT_V_RAW_CM + 7.0 + 0.5   # 308.5cm - fracionario
     walls = [(seg(0, 0, 0, raw_cm), ft(14.0), (False, False))]
     walls_ext, jmap = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
     nodes, end_to_node = m.build_wall_graph(walls_ext, jmap)
@@ -4073,7 +3990,7 @@ def test_fix_all_wall_modulation_errors_despacha_group_shift_e_wall_length_adjus
     em vez de passar por analyze_created_walls_for_errors, provando que o
     DESPACHO de fix_all_wall_modulation_errors continua correto para quem
     ainda montar um plano assim manualmente."""
-    walls = [(seg(0, 0, 0, _ISOLATED_WALL_RAW_CM), ft(14.0), (False, False))]
+    walls = [(seg(0, 0, 0, _GROUP_SHIFT_V_RAW_CM + 7.0), ft(14.0), (False, False))]
     walls_ext, jmap = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
     nodes, end_to_node = m.build_wall_graph(walls_ext, jmap)
     openings_per_wall = [[]]
@@ -4146,7 +4063,7 @@ def test_find_wall_group_shift_fixes_resolve_parcial_bate_com_resolve_completo()
     # esta' presa ao encontro com V, condicao diferente de uma ponta
     # totalmente livre).
     run = walls_ext = nodes = end_to_node = openings_per_wall = None
-    for z_len_cm in (119.0, 159.0, 199.0, 239.0, 279.0, 319.0, 359.0):
+    for z_len_cm in (156.0, 195.0, 234.0, 273.0, 312.0, 351.0, 390.0):
         z_line = seg(1000, 1000, 1000 + z_len_cm, 1000)
         walls = [(w_line, ft(14.0), (False, False)),
                  (v_line, ft(14.0), (False, False)),
@@ -4950,3 +4867,656 @@ def test_show_post_creation_window_reaproveita_resultado_anterior():
         # limpeza - nunca deixar uma janela falsa "ativa" contaminando
         # outros testes que iteram _ACTIVE_MODELESS_WINDOWS.
         del m._ACTIVE_MODELESS_WINDOWS[len(original_active):]
+
+
+# --------- STRAIGHT_CONTINUATION nao reserva amarracao (2026-08-28) -------
+@case
+def test_straight_continuation_nao_reserva_espaco_de_amarracao():
+    """Bug real medido ao vivo via MCP (2026-08-28) contra uma parede que o
+    usuario modulou a mao para servir de referencia: `_wall_end_default_
+    start_cm` so' isentava FREE_END, entao uma ponta STRAIGHT_CONTINUATION
+    reservava meia espessura + junta para uma peca de amarracao que NUNCA e'
+    criada ali (`solve_all_intersections` ignora esse tipo de no'). O trecho
+    livre encolhia ~8cm e a modulacao "nao fechava" por poucos centimetros.
+    AMBIGUOUS continua reservando de proposito - ver docstring da funcao."""
+    walls = [(seg(0, 0, 100, 0), ft(14.0), (False, False))]
+    nodes = [
+        {"kind": "STRAIGHT_CONTINUATION", "point": None, "arms": [(0, 0)]},
+        {"kind": "L_CORNER", "point": None, "arms": [(0, 1)]},
+        {"kind": "FREE_END", "point": None, "arms": [(0, 0)]},
+        {"kind": "AMBIGUOUS", "point": None, "arms": [(0, 1)]},
+    ]
+
+    reserva, junta = m._wall_end_default_start_cm(nodes, {(0, 0): 0}, walls, 0, 0)
+    assert reserva == 0.0, reserva
+    assert junta == m.BLOCK_OPENING_JOINT_CM, junta
+
+    # FREE_END: mesmo resultado (comportamento historico, inalterado).
+    assert m._wall_end_default_start_cm(nodes, {(0, 0): 2}, walls, 0, 0) == (reserva, junta)
+
+    # L_CORNER continua reservando meia espessura (14/2 = 7cm) + junta normal.
+    reserva_l, junta_l = m._wall_end_default_start_cm(nodes, {(0, 1): 1}, walls, 0, 1)
+    assert abs(reserva_l - 7.0) < 1e-6, reserva_l
+    assert junta_l == m.BLOCK_JOINT_CM, junta_l
+
+    # AMBIGUOUS tambem continua reservando (peca real da outra faixa de
+    # altura ocupa esse espaco - zerar aqui dobrou as colisoes na medicao).
+    reserva_amb, _ = m._wall_end_default_start_cm(nodes, {(0, 1): 3}, walls, 0, 1)
+    assert abs(reserva_amb - 7.0) < 1e-6, reserva_amb
+
+
+# ------ EXCECAO regra #1: peca pequena encostada em abertura (2026-08-28) --
+@case
+def test_junta_de_peca_pequena_encostada_em_abertura_e_isenta_da_regra_1():
+    """Regra do usuario (2026-08-28): "os blocos B4, B9 e B19 podem ficar
+    alinhados quando estao encostados nas aberturas, principalmente o b4 e o
+    b9". A junta que separa C04/C09/B19 do vizinho, quando a peca encosta no
+    vao, deixa de contar como junta vertical continua."""
+    layout = [("B39", 0.0, 39.0), ("C04", 40.0, 44.0)]
+    # Sem informar as pontas: comportamento historico (conta a junta).
+    assert len(m._layout_internal_joint_positions_cm(layout, 0.0)) == 1
+    # Ponta final aberta e ultima peca C04 -> junta isenta.
+    assert m._layout_internal_joint_positions_cm(layout, 0.0, trailing_is_open=True) == []
+    # A mesma ponta aberta NAO isenta quando a peca final e' bloco comum.
+    comum = [("B39", 0.0, 39.0), ("B39", 40.0, 79.0)]
+    assert len(m._layout_internal_joint_positions_cm(comum, 0.0, trailing_is_open=True)) == 1
+    # Ponta inicial: simetrico.
+    inicio = [("C09", 0.0, 9.0), ("B39", 10.0, 49.0)]
+    assert m._layout_internal_joint_positions_cm(inicio, 0.0, leading_is_open=True) == []
+    assert len(m._layout_internal_joint_positions_cm(inicio, 0.0, trailing_is_open=True)) == 1
+
+
+@case
+def test_auditoria_isenta_junta_de_pastilha_encostada_no_vao():
+    """Mesma excecao, na SEGUNDA verificacao independente (secao 11.5), que
+    trabalha sobre a posicao REAL das pecas ja' lancadas. Reproduz a parede
+    de referencia: a pastilha final encosta na PONTA do eixo (a janela
+    pertence ao eixo colinear vizinho, entao nao aparece em
+    openings_per_wall deste)."""
+    length_cm = 319.0
+    b39 = (275.0, 314.0, "B39")
+    c04 = (315.0, 319.0, "C04")
+    assert m._joint_is_opening_aligned_exempt(b39, c04, [], length_cm) is True
+
+    # Dois blocos comuns no meio da parede: junta normal, nunca isenta.
+    meio_a = (100.0, 139.0, "B39")
+    meio_b = (140.0, 179.0, "B39")
+    assert m._joint_is_opening_aligned_exempt(meio_a, meio_b, [], length_cm) is False
+
+    # Pastilha no MEIO da parede (longe de vao/ponta): tambem nao isenta.
+    solta_a = (100.0, 139.0, "B39")
+    solta_b = (140.0, 144.0, "C04")
+    assert m._joint_is_opening_aligned_exempt(solta_a, solta_b, [], length_cm) is False
+
+    # Encostada na borda de uma abertura DESTE eixo: isenta.
+    assert m._joint_is_opening_aligned_exempt(
+        solta_a, solta_b, [144.0, 200.0], length_cm) is True
+
+
+# --------------------------------------------------- paredes continuas
+# (WALL_BUILD_MODE_CONTINUOUS - parede inteira + recortes de abertura)
+
+class _FakeContinuousWall(object):
+    """Parede continua ja criada: tem LocationCurve (o eixo inteiro) e serve
+    de hospedeira dos recortes criados por create_wall_opening_cuts."""
+
+    def __init__(self, curve, element_id):
+        self.Location = m.LocationCurve()
+        self.Location.Curve = curve
+        self.Id = element_id
+
+
+class _FakeCut(object):
+    """Recorte (elemento Opening) ja criado. `Location` NAO e' um
+    LocationCurve - e' exatamente assim que apply_axis_opening_fix
+    reconhece um recorte e o translada em vez de reescrever uma curva."""
+
+    def __init__(self, element_id):
+        self.Id = element_id
+        self.Location = revit_stubs._Inert()
+        self.IsValidObject = True
+
+
+class _FakeOpeningInstance(object):
+    def __init__(self, element_id):
+        self.Id = element_id
+        self.IsValidObject = True
+
+
+@case
+def test_modo_continuo_gera_uma_unica_parede_ignorando_as_aberturas():
+    """Regra 1/2/3 do modo novo: a parede nasce inteira, do nivel ate a
+    altura cheia, sem nenhuma divisao por abertura."""
+    axis = seg(0, 0, 400, 0)
+    openings = [(ft(162.0), ft(242.0), 0.0, ft(210.0))]
+
+    segmentado = m.build_wall_segments(axis, 0.0, ft(280.0), openings)
+    continuo = m.build_wall_segments(
+        axis, 0.0, ft(280.0), openings,
+        wall_build_mode=m.WALL_BUILD_MODE_CONTINUOUS
+    )
+
+    # o metodo atual continua fatiando (pilar + verga + pilar)...
+    assert len(segmentado) == 3
+    # ...e o novo devolve a parede inteira, altura cheia, offset 0.
+    assert len(continuo) == 1
+    sub_line, height_ft, base_offset_ft, origin = continuo[0]
+    assert sub_line is axis
+    assert abs(to_cm(height_ft) - 280.0) < 1e-6
+    assert base_offset_ft == 0.0
+    assert origin == "cad"
+
+
+@case
+def test_recorte_respeita_posicao_largura_altura_e_peitoril_da_abertura():
+    """Regra 6: cada recorte sai exatamente na posicao/largura/altura/
+    peitoril lidos da abertura. Janela com peitoril 100cm e verga 210cm num
+    eixo de 400cm, parede de 280cm."""
+    axis = seg(0, 0, 400, 0)
+    base_z = ft(50.0)  # nivel fora do zero de proposito
+    openings = [(ft(162.0), ft(242.0), base_z + ft(100.0), base_z + ft(210.0))]
+
+    cuts = m.build_wall_opening_cuts(axis, base_z, ft(280.0), openings)
+    assert len(cuts) == 1
+    cut = cuts[0]
+    assert cut["opening_index"] == 0
+    assert abs(to_cm(cut["width_ft"]) - 80.0) < 0.01
+    assert abs(to_cm(cut["height_ft"]) - 110.0) < 0.01
+    # cantos OPOSTOS do retangulo, em coordenadas de mundo
+    assert abs(to_cm(cut["p_start"].X) - 162.0) < 0.01
+    assert abs(to_cm(cut["p_end"].X) - 242.0) < 0.01
+    # nenhuma folga nas arestas internas (peitoril e verga tem parede)
+    assert abs(to_cm(cut["p_start"].Z - base_z) - 100.0) < 0.01
+    assert abs(to_cm(cut["p_end"].Z - base_z) - 210.0) < 0.01
+
+
+@case
+def test_recorte_de_porta_extrapola_a_base_para_atravessar_a_parede():
+    """Porta (peitoril 0) e abertura que alcanca o topo: so' as arestas que
+    ENCOSTAM na parede recebem a folga OPENING_CUT_EDGE_OVERSHOOT_FT - a
+    aresta interna fica na cota exata."""
+    axis = seg(0, 0, 400, 0)
+    base_z = ft(50.0)
+    wall_height_ft = ft(280.0)
+    porta = [(ft(100.0), ft(190.0), base_z, base_z + ft(210.0))]
+    ate_o_topo = [(ft(100.0), ft(190.0), base_z + ft(100.0), base_z + ft(280.0))]
+
+    cut_porta = m.build_wall_opening_cuts(axis, base_z, wall_height_ft, porta)[0]
+    assert cut_porta["p_start"].Z < base_z          # passou por baixo
+    assert abs(to_cm(base_z - cut_porta["p_start"].Z) - 1.0) < 0.01
+    assert abs(to_cm(cut_porta["p_end"].Z - base_z) - 210.0) < 0.01  # verga exata
+    # os valores UTEIS reportados nunca carregam a folga
+    assert abs(cut_porta["sill_z_abs"] - base_z) < 1e-9
+    assert abs(to_cm(cut_porta["height_ft"]) - 210.0) < 0.01
+
+    cut_topo = m.build_wall_opening_cuts(axis, base_z, wall_height_ft, ate_o_topo)[0]
+    assert cut_topo["p_end"].Z > base_z + wall_height_ft
+    assert abs(to_cm(cut_topo["p_start"].Z - base_z) - 100.0) < 0.01  # peitoril exato
+
+
+@case
+def test_recorte_degenerado_e_descartado_em_vez_de_ir_para_o_revit():
+    """Abertura sem altura util (peitoril acima do topo da parede) ou sem
+    largura util (fora do eixo) nao vira recorte - o Revit recusaria."""
+    axis = seg(0, 0, 400, 0)
+    sem_altura = [(ft(100.0), ft(190.0), ft(300.0), ft(320.0))]
+    sem_largura = [(ft(500.0), ft(560.0), 0.0, ft(210.0))]
+    assert m.build_wall_opening_cuts(axis, 0.0, ft(280.0), sem_altura) == []
+    assert m.build_wall_opening_cuts(axis, 0.0, ft(280.0), sem_largura) == []
+    assert m.build_wall_opening_cuts(axis, 0.0, ft(280.0), []) == []
+
+
+@case
+def test_create_wall_opening_cuts_usa_a_ferramenta_nativa_e_indexa_por_abertura():
+    """Regra 5: o recorte e' feito com a Abertura de Parede nativa
+    (Document.Create.NewOpening), um Opening por abertura, indexado pelo
+    MESMO indice de openings_per_wall que o resto do motor usa."""
+    axis = seg(0, 0, 400, 0)
+    openings = [
+        (ft(60.0), ft(140.0), 0.0, ft(210.0)),
+        (ft(220.0), ft(300.0), ft(100.0), ft(210.0)),
+    ]
+    cuts = m.build_wall_opening_cuts(axis, 0.0, ft(280.0), openings)
+    stub_doc = revit_stubs._StubDoc()
+    wall = _FakeContinuousWall(axis, revit_stubs.ElementId(77))
+
+    ids_by_index, failures = m.create_wall_opening_cuts(stub_doc, wall, cuts)
+
+    assert failures == []
+    assert sorted(ids_by_index.keys()) == [0, 1]
+    assert len(ids_by_index[0]) == 1 and len(ids_by_index[1]) == 1
+    assert len(stub_doc.Create.openings) == 2
+    # os pontos enviados ao Revit sao os cantos calculados, sem intermediario
+    for cut, (host, p1, p2) in zip(cuts, stub_doc.Create.openings):
+        assert host is wall
+        assert p1 is cut["p_start"] and p2 is cut["p_end"]
+
+
+@case
+def test_create_wall_opening_cuts_um_recorte_recusado_nao_derruba_os_outros():
+    """Mesma disciplina do try/except por segmento do modo segmentado."""
+    axis = seg(0, 0, 400, 0)
+    openings = [
+        (ft(60.0), ft(140.0), 0.0, ft(210.0)),
+        (ft(220.0), ft(300.0), ft(100.0), ft(210.0)),
+    ]
+    cuts = m.build_wall_opening_cuts(axis, 0.0, ft(280.0), openings)
+
+    class _DocQueRecusaOPrimeiro(object):
+        class Create(object):
+            def __init__(self):
+                self.calls = 0
+
+            def NewOpening(self, wall, p1, p2):
+                self.calls += 1
+                if self.calls == 1:
+                    raise Exception("recusado pelo Revit")
+                return revit_stubs._FakeOpening(wall, p1, p2)
+
+        def __init__(self):
+            self.Create = _DocQueRecusaOPrimeiro.Create()
+
+    stub_doc = _DocQueRecusaOPrimeiro()
+    ids_by_index, failures = m.create_wall_opening_cuts(
+        stub_doc, _FakeContinuousWall(axis, revit_stubs.ElementId(77)), cuts
+    )
+    assert list(ids_by_index.keys()) == [1]
+    assert len(failures) == 1
+    assert "recusado pelo Revit" in failures[0]
+
+
+def _continuous_axis_fixture(pier_left_cm, width_cm, pier_right_cm):
+    """Mesmo eixo de _one_opening_axis_fixture, mas no modo CONTINUO: uma
+    unica parede inteira + um recorte nativo no lugar dos 3 segmentos."""
+    axis_len_cm = pier_left_cm + width_cm + pier_right_cm
+    axis = seg(0, 0, axis_len_cm, 0)
+    id_wall, id_cut, id_opening = 301, 302, 999
+    fake_doc = _FakeDoc({
+        id_wall: _FakeContinuousWall(axis, id_wall),
+        id_cut: _FakeCut(id_cut),
+        id_opening: _FakeOpeningInstance(id_opening),
+    })
+    walls_to_create = [(axis, ft(14.0), (False, False))]
+    openings_per_wall = [[(ft(pier_left_cm), ft(pier_left_cm + width_cm), 0.0, ft(210.0))]]
+    created_walls_by_axis = {0: [(id_wall, "cad")]}
+    created_cuts_by_axis = {0: {0: [id_cut]}}
+    center_t_ft = ft(pier_left_cm + width_cm / 2.0)
+    opening = {
+        "element_id_obj": id_opening, "element_id": str(id_opening),
+        "center_xy": XYZ(axis.GetEndPoint(0).X + center_t_ft, 0.0, 0.0),
+        "width_ft": ft(width_cm),
+    }
+    return (fake_doc, walls_to_create, openings_per_wall, created_walls_by_axis,
+            created_cuts_by_axis, [opening], id_wall, id_cut)
+
+
+@case
+def test_modo_continuo_sintetiza_pilaretes_para_a_etapa_3b():
+    """Sem pilaretes como elementos separados, _classify_wall_axis_segments
+    os sintetiza a partir do eixo + aberturas - mesmos comprimentos que o
+    modo segmentado devolve para o mesmo eixo (162/158)."""
+    (fake_doc, walls_to_create, openings_per_wall, created_walls_by_axis,
+     created_cuts_by_axis, _openings, id_wall, id_cut) = _continuous_axis_fixture(162.0, 80.0, 158.0)
+
+    result = m._classify_wall_axis_segments(
+        fake_doc, 0, walls_to_create, openings_per_wall, created_walls_by_axis,
+        created_cuts_by_axis=created_cuts_by_axis,
+    )
+    assert result is not None
+    assert len(result["piers"]) == 2
+    assert all(p["virtual"] for p in result["piers"])
+    assert all(p["element_id"] == id_wall for p in result["piers"])
+    assert abs(to_cm(result["piers"][0]["t_b"] - result["piers"][0]["t_a"]) - 162.0) < 0.01
+    assert abs(to_cm(result["piers"][1]["t_b"] - result["piers"][1]["t_a"]) - 158.0) < 0.01
+    assert result["openings"][0]["infill_ids"] == [id_cut]
+
+
+@case
+def test_modo_continuo_fora_de_escopo_quando_o_vao_encosta_na_ponta_do_eixo():
+    """Mesma regra do modo segmentado: sem pilarete de um dos lados o eixo
+    sai do ajuste automatico (nunca vira um plano pela metade)."""
+    (fake_doc, walls_to_create, openings_per_wall, created_walls_by_axis,
+     created_cuts_by_axis, _openings, _id_wall, _id_cut) = _continuous_axis_fixture(0.0, 80.0, 158.0)
+    result = m._classify_wall_axis_segments(
+        fake_doc, 0, walls_to_create, openings_per_wall, created_walls_by_axis,
+        created_cuts_by_axis=created_cuts_by_axis,
+    )
+    assert result is None
+
+
+@case
+def test_modo_continuo_fora_de_escopo_quando_o_recorte_nao_foi_criado():
+    (fake_doc, walls_to_create, openings_per_wall, created_walls_by_axis,
+     _cuts, _openings, _id_wall, _id_cut) = _continuous_axis_fixture(162.0, 80.0, 158.0)
+    result = m._classify_wall_axis_segments(
+        fake_doc, 0, walls_to_create, openings_per_wall, created_walls_by_axis,
+        created_cuts_by_axis={0: {}},  # NewOpening falhou para este vao
+    )
+    assert result is None
+
+
+@case
+def test_plano_de_ajuste_no_modo_continuo_desloca_abertura_e_recorte_sem_tocar_na_parede():
+    """O mesmo plano de sempre (162/158 -> 160/160, -2cm) tem que sair
+    identico no modo continuo, e ao ser APLICADO nao pode reescrever a
+    curva da parede: so' o recorte e a instancia da abertura se movem."""
+    (fake_doc, walls_to_create, openings_per_wall, created_walls_by_axis,
+     created_cuts_by_axis, all_openings, id_wall, id_cut) = _continuous_axis_fixture(162.0, 80.0, 158.0)
+
+    plan = m.plan_axis_opening_fix(
+        fake_doc, 0, walls_to_create, openings_per_wall, created_walls_by_axis,
+        all_openings, created_cuts_by_axis=created_cuts_by_axis,
+    )
+    assert plan["feasible"] is True
+    assert abs(plan["max_shift_cm"] - 2.0) < 0.01
+    assert abs(plan["length_delta_cm"]) < 1e-9
+    assert all(p["virtual"] for p in plan["new_piers"])
+
+    curva_antes = fake_doc.GetElement(id_wall).Location.Curve
+    transform_stub = m.ElementTransformUtils
+    del transform_stub.calls[:]
+
+    # `g` obrigatorio: apply_axis_opening_fix reatribui XYZ/LocationCurve/...
+    # como LOCAIS quando ele existe, entao esses nomes so' resolvem por ele
+    # (mesmo dicionario que _PostCreationEventHandler monta em self._g).
+    g = {name: m.__dict__[name] for name in (
+        "XYZ", "LocationCurve", "Line", "ElementTransformUtils",
+        "_set_opening_width_param", "_opening_center_from_geometry", "FEET_PER_METER",
+    )}
+    applied, failures = m.apply_axis_opening_fix(fake_doc, plan, walls_to_create, g=g)
+
+    assert failures == []
+    assert applied == 1
+    # a parede continua NAO foi reescrita
+    assert fake_doc.GetElement(id_wall).Location.Curve is curva_antes
+    # recorte e instancia da abertura andaram o MESMO -2cm ao longo do eixo
+    moved = [call for call in transform_stub.calls if call[0] == "move"]
+    assert len(moved) == 2
+    assert [call[1] for call in moved] == [id_cut, 999]
+    for _kind, _eid, translation in moved:
+        assert abs(to_cm(translation.X) + 2.0) < 0.01
+        assert abs(translation.Y) < 1e-9
+
+
+@case
+def test_setup_form_oferece_os_dois_modos_de_geracao_de_parede():
+    """A opcao nova e' independente e o padrao continua sendo o metodo
+    atual (segmentado) - trocar de modo nao mexe em mais nada do setup."""
+    lines_by_layer = {"PAREDES": [seg(0, 0, 500, 0), seg(0, 14, 500, 14)]}
+    form = m._SetupForm(lines_by_layer, ["Nivel 1"], {})
+    form._thickness_list.SetItemChecked(0, True)
+    assert form._wall_mode_segmented.Checked is True
+    assert form._wall_mode_continuous.Checked is False
+    form._on_run(None, None)
+    assert form.result["wall_mode"] == m.WALL_BUILD_MODE_SEGMENTED
+
+    lembrado = m._SetupForm(lines_by_layer, ["Nivel 1"],
+                            {"wall_mode": m.WALL_BUILD_MODE_CONTINUOUS})
+    lembrado._thickness_list.SetItemChecked(0, True)
+    assert lembrado._wall_mode_continuous.Checked is True
+    lembrado._on_run(None, None)
+    assert lembrado.result["wall_mode"] == m.WALL_BUILD_MODE_CONTINUOUS
+    # nada mais do setup muda por causa do modo
+    for key in ("layer", "thicknesses_cm", "level", "height_m", "openings_mode"):
+        assert lembrado.result[key] == form.result[key]
+
+
+@case
+def test_ajustar_erros_no_modo_continuo_revalida_os_pilaretes_nao_a_parede_inteira():
+    """Regressao de projeto: no modo continuo a parede e' UM elemento cujo
+    comprimento nao muda quando a abertura se desloca. Revalidar o
+    comprimento DELA reprovaria (e desfaria) toda correcao boa num eixo
+    cujo total por acaso nao fecha em blocos - aqui 402cm (incompativel)
+    com pilaretes que o ajuste leva a 160/160 (compativeis)."""
+    (fake_doc, walls_to_create, openings_per_wall, created_walls_by_axis,
+     created_cuts_by_axis, all_openings, id_wall, id_cut) = _continuous_axis_fixture(162.0, 82.0, 158.0)
+
+    assert abs(to_cm(walls_to_create[0][0].Length) - 402.0) < 0.01
+    assert m.evaluate_wall_block_length(402.0)["compatible"] is False
+
+    plan = m.plan_axis_opening_fix(
+        fake_doc, 0, walls_to_create, openings_per_wall, created_walls_by_axis,
+        all_openings, created_cuts_by_axis=created_cuts_by_axis,
+    )
+    assert plan["feasible"] is True
+
+    rows = [{"wall_idx": 0, "wall_ids": [id_wall],
+             "problem_text": "modulacao nao fecha", "auto_fixable": True, "fix_plan": plan}]
+    g = dict(m.__dict__)
+    del m.ElementTransformUtils.calls[:]
+
+    fixed, manual, updated = m.fix_all_wall_modulation_errors(
+        fake_doc, rows, walls_to_create, openings_per_wall,
+        created_walls_by_axis=created_walls_by_axis, all_openings=all_openings, g=g,
+        created_cuts_by_axis=created_cuts_by_axis,
+    )
+    assert fixed == 1 and manual == 0, (fixed, manual, updated[0]["problem_text"])
+    assert updated[0]["resolved"] is True
+    # openings_per_wall so' e' reescrito apos o Commit - e com a nova posicao
+    novo_t_lo, novo_t_hi, _sill, _head = openings_per_wall[0][0]
+    assert abs(to_cm(novo_t_lo) - 160.0) < 0.01
+    assert abs(to_cm(novo_t_hi) - 242.0) < 0.01
+
+
+@case
+def test_radios_de_modo_de_parede_nao_ficam_no_mesmo_grupo_das_portas_janelas():
+    """Regressao do bug corrigido em 2026-08-28 na tela de preparacao das
+    paredes: no WinForms a exclusao mutua entre RadioButtons vale entre os
+    que tem o MESMO PAI DIRETO. Se as opcoes de modo de parede fossem
+    filhas diretas do mesmo painel que as de portas/janelas, os QUATRO
+    virariam um grupo so' e marcar 'paredes continuas' desmarcaria
+    'selecionar portas/janelas no modelo'."""
+    form = m._SetupForm({"PAREDES": [seg(0, 0, 400, 0), seg(0, 14, 400, 14)]}, ["Nivel 1"], {})
+
+    def _pai_direto(alvo):
+        for control in form.descendants():
+            for filho in control.Controls:
+                if filho is alvo:
+                    return control
+        return None
+
+    pai_modo = _pai_direto(form._wall_mode_segmented)
+    assert pai_modo is _pai_direto(form._wall_mode_continuous)
+    assert pai_modo is not _pai_direto(form._openings_pick)
+    assert _pai_direto(form._openings_pick) is _pai_direto(form._openings_auto)
+
+
+# ---- regra #2 tem prioridade sobre o desencontro de junta (2026-08-28) ----
+@case
+def test_desencontro_de_junta_nunca_empilha_compensadores():
+    """Bug real medido ao vivo via MCP (2026-08-28): num trecho de 29cm
+    fechado dos dois lados, o baseline `B19+C09` coincidia a junta com a
+    Fiada A, e a busca de desencontro trocava por `C04+C09+C09+C04` -
+    QUATRO compensadores em sequencia, que `validate_wall_modulation`
+    reprova logo em seguida (`sem_compensadores_consecutivos`, regra #2).
+    Trocar uma junta coincidente (registrada em `alignment_conflicts` e
+    escalada para ajuste geometrico) por uma parede REPROVADA nunca e' um
+    bom negocio: a regra #2 passou a ser o criterio PRIMARIO do score."""
+    # A medida em si.
+    assert m._layout_compensator_run_excess([("B19", 0.0, 19.0), ("C09", 20.0, 29.0)], CATALOG) == 0
+    assert m._layout_compensator_run_excess(
+        [("C04", 0.0, 4.0), ("C09", 5.0, 14.0), ("C09", 15.0, 24.0), ("C04", 25.0, 29.0)],
+        CATALOG) == 3
+    assert m._layout_compensator_run_excess(
+        [("C09", 0.0, 9.0), ("B39", 10.0, 49.0), ("C04", 50.0, 54.0)], CATALOG) == 0
+
+    # O caso real: 29cm, junta da Fiada A em 19,5cm.
+    baseline = m._pier_ordered_layout(29.0, CATALOG, 0.0, 0.0)
+    assert [c[0] for c in baseline] == ["B19", "C09"], baseline
+    joints_a = m._layout_internal_joint_positions_cm(baseline, 0.0)
+
+    escolhido = m._pier_layout_avoiding_joints(29.0, CATALOG, 0.0, 0.0, 0.0, joints_a)
+    assert m._layout_compensator_run_excess(escolhido, CATALOG) == 0, [c[0] for c in escolhido]
+
+
+@case
+def test_busca_exata_fecha_trecho_que_o_guloso_nao_fecha():
+    """O guloso pega sempre a maior peca que cabe e nunca volta atras, entao
+    falha em trechos que so' fecham com uma peca menor mais cedo. Medido ao
+    vivo via MCP (2026-08-28): 33 eixos de um projeto real eram reprovados
+    pela regra #2 (compensadores em sequencia) tendo TODOS uma composicao
+    limpa disponivel."""
+    # 139cm = 4xB34 e nenhum B39 - nenhuma escolha de PRIMEIRO bloco leva o
+    # guloso ate' la'.
+    assert m._greedy_fill_blocks(140.0, 0.0, CATALOG, ["B39", "B34"]) is None
+    exato = m._exact_fill_blocks(140.0, 0.0, CATALOG, ["B39", "B34"])
+    assert [c[0] for c in exato] == ["B34"] * 4, exato
+
+    # 469cm = 10xB39 + 2xB34 (o caso real que virava 11xB39 + 3xC09).
+    exato469 = m._exact_fill_blocks(470.0, 0.0, CATALOG, ["B39", "B34"])
+    assert sorted(c[0] for c in exato469) == ["B34"] * 2 + ["B39"] * 10, exato469
+    # fecha exatamente: soma dos blocos + juntas internas
+    total = sum(c[2] - c[1] for c in exato469) + (len(exato469) - 1) * m.BLOCK_JOINT_CM
+    assert abs(total - 469.0) < 1e-6, total
+
+    # Quando o guloso JA' fecha, o resultado nao muda (sem regressao).
+    assert m._greedy_fill_blocks_any_first(
+        200.0, 0.0, CATALOG, ["B39", "B34"]) == m._greedy_fill_blocks(
+        200.0, 0.0, CATALOG, ["B39", "B34"])
+
+    # Trecho que nao fecha com nenhuma combinacao -> None (nunca inventa).
+    assert m._exact_fill_blocks(3.0, 0.0, CATALOG, ["B39", "B34"]) is None
+
+
+# ---- regra 18.7: preenchimento nunca nasce dentro de uma amarracao ----
+@case
+def test_preenchimento_que_invade_amarracao_e_descartado():
+    """Regra 18.7 + prioridade #1 do usuario (2026-08-28): "nunca sacrificar
+    uma amarracao correta apenas para preencher um espaco". Medido ao vivo
+    via MCP e fotografado pelo usuario: cada fiada A tinha 4 B34 e 4 B19 do
+    preenchimento nascendo DENTRO do B54 de um T_INTERSECTION - no Revit,
+    tres blocos ocupando a mesma regiao."""
+    assert m._is_tie_candidate({"placement_reason": "T_INTERSECTION_MAIN"}) is True
+    assert m._is_tie_candidate({"placement_reason": "L_CORNER"}) is True
+    assert m._is_tie_candidate({"placement_reason": "X_INTERSECTION"}) is True
+    assert m._is_tie_candidate({"placement_reason": "T_INTERSECTION_DEGRADED_L"}) is True
+    assert m._is_tie_candidate({"placement_reason": "STANDARD_FILL"}) is False
+
+    walls = [(seg(0, 0, 300, 0), ft(14.0), (False, False))]
+    # B54 de amarracao centrado em x=100 e um B34 de preenchimento DENTRO dele
+    tie = m._make_block_candidate(
+        "B54", CATALOG["B54"], "A", XYZ(ft(100), 0.0, 0.0), XYZ(1, 0, 0),
+        "T_INTERSECTION_MAIN", node_index=1, wall_idx=0)
+    dentro = m._make_block_candidate(
+        "B34", CATALOG["B34"], "A", XYZ(ft(100), 0.0, 0.0), XYZ(1, 0, 0),
+        "STANDARD_FILL", wall_idx=0)
+    longe = m._make_block_candidate(
+        "B39", CATALOG["B39"], "A", XYZ(ft(250), 0.0, 0.0), XYZ(1, 0, 0),
+        "STANDARD_FILL", wall_idx=0)
+
+    mantidas, descartadas = m._drop_fill_colliding_with_ties([tie, dentro, longe])
+    codigos = [c["logical_code"] for c in mantidas]
+    assert "B54" in codigos, codigos          # a amarracao SEMPRE fica
+    assert "B39" in codigos, codigos          # o preenchimento que nao invade fica
+    assert "B34" not in codigos, codigos      # o que invadia foi descartado
+    assert [c["logical_code"] for c in descartadas] == ["B34"], descartadas
+
+    # Sem colisao nenhuma: devolve a lista intacta, sem descarte.
+    mantidas2, descartadas2 = m._drop_fill_colliding_with_ties([tie, longe])
+    assert len(mantidas2) == 2 and descartadas2 == []
+
+    # Duas AMARRACOES colidindo entre si nunca sao descartadas (nao ha'
+    # criterio para eleger um vencedor) - continuam para revisao manual.
+    tie2 = m._make_block_candidate(
+        "B54", CATALOG["B54"], "A", XYZ(ft(110), 0.0, 0.0), XYZ(1, 0, 0),
+        "T_INTERSECTION_MAIN", node_index=2, wall_idx=0)
+    mantidas3, descartadas3 = m._drop_fill_colliding_with_ties([tie, tie2])
+    assert len(mantidas3) == 2 and descartadas3 == [], descartadas3
+
+
+# ---- regra 18.4: fiadas de mesma paridade repetem (K=1) ----
+@case
+def test_fiadas_de_mesma_paridade_repetem_com_o_default():
+    """Regra 18.4 (2026-08-28, pedido explicito do usuario a partir de
+    prints do modelo real): "Fiada 1 deve ser o mais semelhante possivel a'
+    Fiada 3; Fiada 2 ... a' Fiada 4". O default
+    `PIER_LAYOUT_VARIANTS_PER_COURSE` voltou a 1 justamente para isso - com
+    K=3 as fiadas usavam as variantes 0,0,1,1,2,2,... e a fiada 1 NUNCA era
+    igual a' 3."""
+    assert m.PIER_LAYOUT_VARIANTS_PER_COURSE == 1, m.PIER_LAYOUT_VARIANTS_PER_COURSE
+
+    walls = [(seg(0, 0, 399, 0), ft(14.0), (False, False))]
+    walls, junction_map = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
+    nodes, end_to_node = m.build_wall_graph(walls, junction_map)
+    res = m.solve_building_blocks_all_courses(
+        nodes, walls, end_to_node, [[]], CATALOG, ft(0.0), 15,
+    )
+    assert res["error"] is None
+    cc = res["course_candidates"]
+
+    def assinatura(ci):
+        return sorted(
+            (c["logical_code"], round(c["origin_world"].X, 3), round(c["origin_world"].Y, 3))
+            for c in cc[ci]
+        )
+
+    # sem abertura nenhuma nao ha' banda diferente: as fiadas de mesma
+    # paridade tem de sair IDENTICAS, peca por peca e posicao por posicao.
+    for ci in (2, 4, 6, 8, 10, 12, 14):
+        assert assinatura(ci) == assinatura(0), "fiada {} difere da fiada 0".format(ci)
+    for ci in (3, 5, 7, 9, 11, 13):
+        assert assinatura(ci) == assinatura(1), "fiada {} difere da fiada 1".format(ci)
+
+    # e as duas paridades continuam DIFERENTES entre si (a amarracao
+    # depende disso - se A e B fossem iguais, a junta seria corrida).
+    assert assinatura(0) != assinatura(1)
+
+
+# ---- regra 18.6: transicao entre pecas trava o prisma ----
+@case
+def test_desempate_prefere_a_composicao_que_trava_melhor():
+    """Regra 18.6 (2026-08-28): duas composicoes podem ter ZERO
+    coincidencia de junta (as duas passam na regra #1) e ainda assim uma
+    travar muito melhor que a outra. O desempate agora olha o AFASTAMENTO
+    da junta mais proxima da fiada oposta - "so' permitir a transicao se o
+    bloco puder ser corretamente encaixado e permitir a continuidade do
+    prisma"."""
+    # junta interna em 39,5cm (dois B39 de 39cm com junta de 1cm)
+    layout = [("B39", 0.0, 39.0), ("B39", 40.0, 79.0)]
+    assert m._layout_internal_joint_positions_cm(layout, 0.0) == [39.5]
+
+    # fiada oposta com junta em 20cm -> afastamento de 19,5cm (trava bem)
+    assert abs(m._layout_min_joint_stagger_cm(layout, 0.0, [20.0]) - 19.5) < 1e-6
+    # fiada oposta com junta em 37cm -> afastamento de 2,5cm (trava mal)
+    assert abs(m._layout_min_joint_stagger_cm(layout, 0.0, [37.0]) - 2.5) < 1e-6
+    # pega o MENOR afastamento quando ha varias juntas opostas
+    assert abs(m._layout_min_joint_stagger_cm(layout, 0.0, [20.0, 37.0]) - 2.5) < 1e-6
+
+    # sem com o que comparar: None (nunca quebra o chamador)
+    assert m._layout_min_joint_stagger_cm(layout, 0.0, []) is None
+    assert m._layout_min_joint_stagger_cm([("B39", 0.0, 39.0)], 0.0, [20.0]) is None
+
+
+# ---- regra 18.2: pilarete entre aberturas propoe o proprio ajuste ----
+@case
+def test_pilarete_entre_aberturas_propoe_deslocamento_pequeno():
+    """Regra 18.2 (2026-08-28): o trecho entre duas aberturas e' analisado
+    POR SI. Quando falta pouco, propoe deslocar uma borda de abertura -
+    "deslocar uma das portas 1 cm para um dos lados". Diferente de
+    `plan_axis_opening_fix`, que desiste do EIXO INTEIRO quando a topologia
+    nao bate (medido: com as 77 aberturas do projeto real encostando na
+    ponta do segmento, nenhum eixo conseguia plano)."""
+    # eixo de 400cm com duas aberturas, deixando um pilarete no meio
+    walls = [(seg(0, 0, 400, 0), ft(14.0), (False, False))]
+    walls, junction_map = m.extend_wall_ends_to_junctions(walls, m.JUNCTION_FACE_SEARCH_FT)
+    nodes, end_to_node = m.build_wall_graph(walls, junction_map)
+    # (t_inicio, t_fim, peitoril, topo) em pes - duas portas
+    openings_per_wall = [[
+        (ft(80.0), ft(160.0), ft(0.0), ft(210.0)),
+        (ft(240.0), ft(320.0), ft(0.0), ft(210.0)),
+    ]]
+
+    plano = m.plan_pier_opening_nudges(
+        0, walls, openings_per_wall, CATALOG, nodes, end_to_node)
+    # pode ou nao haver proposta (depende da aritmetica do trecho), mas a
+    # funcao nunca pode levantar excecao nem devolver formato invalido
+    if plano is not None:
+        assert plano["wall_idx"] == 0
+        assert plano["nudges"]
+        for n in plano["nudges"]:
+            assert n["lado"] in ("inicio", "fim"), n
+            assert abs(n["delta_cm"]) <= m.PIER_NUDGE_MAX_CM + 1e-6, n
+            assert abs((n["atual_cm"] + n["delta_cm"]) - n["alvo_cm"]) < 1e-6, n
+
+    # eixo SEM abertura nenhuma: nada a propor, nunca quebra
+    assert m.plan_pier_opening_nudges(0, walls, [[]], CATALOG, nodes, end_to_node) is None

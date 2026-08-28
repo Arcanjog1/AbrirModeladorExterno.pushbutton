@@ -52,12 +52,11 @@ __all__ = [
     "_cluster_wall_arms", "_classify_point_along_wall",
     "_find_wall_touching_point", "_classify_wall_node",
     "_find_wall_midspan_crossings", "build_wall_graph", "build_plan_bounds",
-    "deduplicate_walls", "merge_connected_collinear_walls", "build_no_pairs_message",
+    "deduplicate_walls", "build_no_pairs_message",
     "scan_candidate_thicknesses_cm", "compute_detection_tolerance_ft",
     "WALL_GRAPH_NODE_SNAP_TOLERANCE_M", "WALL_GRAPH_NODE_SNAP_TOLERANCE_FT",
     "WALL_GRAPH_PERPENDICULAR_TOLERANCE", "WALL_GRAPH_COLLINEAR_TOLERANCE",
-    "CONTINUOUS_WALL_AXIS_TOLERANCE_FT", "CONTINUOUS_WALL_GAP_TOLERANCE_FT",
-    "CONTINUOUS_WALL_THICKNESS_TOLERANCE_FT",
+    "merge_connected_collinear_walls",
     # ---- associacao abertura -> parede (extraido junto com a "arquitetura
     # do modelador externo", 2026-08-26 - ver build_capture_payload em
     # ModulacaoAutomatica/.../core/capture_export.py, que serializa as
@@ -65,6 +64,92 @@ __all__ = [
     "_project_opening_raw", "_project_opening_on_line", "_merge_opening_matches",
     "find_openings_on_line", "assign_openings_to_walls", "build_wall_segments",
 ]
+
+
+# Compatibilidade para o modelador externo: fragmentos colineares vindos da
+# captura Revit precisam ser um único eixo antes do solver construir o grafo.
+CONTINUOUS_WALL_AXIS_TOLERANCE_FT = 0.01 * FEET_PER_METER
+CONTINUOUS_WALL_GAP_TOLERANCE_FT = 0.01 * FEET_PER_METER
+CONTINUOUS_WALL_THICKNESS_TOLERANCE_FT = 0.005 * FEET_PER_METER
+
+
+def _line_interval_on_axis(line, origin, direction):
+    values = [(XYZ(line.GetEndPoint(i).X, line.GetEndPoint(i).Y, 0.0) - origin).DotProduct(direction)
+              for i in (0, 1)]
+    return min(values), max(values)
+
+
+def _collinear_walls_are_continuous(wall_a, wall_b, axis_tolerance_ft, gap_tolerance_ft):
+    line_a, thickness_a, _locks_a = wall_a
+    line_b, thickness_b, _locks_b = wall_b
+    if abs(thickness_a - thickness_b) > CONTINUOUS_WALL_THICKNESS_TOLERANCE_FT:
+        return False
+    if abs(line_a.GetEndPoint(0).Z - line_b.GetEndPoint(0).Z) > axis_tolerance_ft:
+        return False
+    if not are_lines_parallel(line_a, line_b):
+        return False
+    if get_distance_between_parallel_lines(line_a, line_b) > axis_tolerance_ft:
+        return False
+    origin = XYZ(line_a.GetEndPoint(0).X, line_a.GetEndPoint(0).Y, 0.0)
+    direction = (XYZ(line_a.GetEndPoint(1).X, line_a.GetEndPoint(1).Y, 0.0) - origin).Normalize()
+    a0, a1 = _line_interval_on_axis(line_a, origin, direction)
+    b0, b1 = _line_interval_on_axis(line_b, origin, direction)
+    return max(a0, b0) - min(a1, b1) <= gap_tolerance_ft
+
+
+def merge_connected_collinear_walls(walls_to_create, axis_tolerance_ft=CONTINUOUS_WALL_AXIS_TOLERANCE_FT,
+                                    gap_tolerance_ft=CONTINUOUS_WALL_GAP_TOLERANCE_FT, source_keys=None):
+    """Une só fragmentos contínuos com mesma espessura/chave de origem."""
+    walls = list(walls_to_create or [])
+    if source_keys is not None and len(source_keys) != len(walls):
+        raise ValueError("source_keys deve ter uma chave por parede")
+    parent = list(range(len(walls)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for first in range(len(walls)):
+        for second in range(first + 1, len(walls)):
+            if source_keys is not None and source_keys[first] != source_keys[second]:
+                continue
+            if _collinear_walls_are_continuous(walls[first], walls[second], axis_tolerance_ft, gap_tolerance_ft):
+                root_first, root_second = find(first), find(second)
+                if root_first != root_second:
+                    parent[root_second] = root_first
+    grouped = {}
+    for index in range(len(walls)):
+        grouped.setdefault(find(index), []).append(index)
+    source_groups = sorted(grouped.values(), key=min)
+    merged = []
+    for group in source_groups:
+        if len(group) == 1:
+            merged.append(walls[group[0]])
+            continue
+        reference = max(group, key=lambda idx: walls[idx][0].Length)
+        reference_line = walls[reference][0]
+        origin = XYZ(reference_line.GetEndPoint(0).X, reference_line.GetEndPoint(0).Y, 0.0)
+        direction = (XYZ(reference_line.GetEndPoint(1).X, reference_line.GetEndPoint(1).Y, 0.0) - origin).Normalize()
+        endpoints = []
+        for index in group:
+            line, _thickness, locks = walls[index]
+            for end_index in (0, 1):
+                point = line.GetEndPoint(end_index)
+                flat = XYZ(point.X, point.Y, 0.0)
+                endpoints.append(((flat - origin).DotProduct(direction), point, locks[end_index]))
+        min_t, min_point, min_locked = min(endpoints, key=lambda row: row[0])
+        max_t, max_point, max_locked = max(endpoints, key=lambda row: row[0])
+        first_wall = walls[min(group)]
+        merged.append((
+            Line.CreateBound(
+                XYZ(origin.X + direction.X * min_t, origin.Y + direction.Y * min_t, min_point.Z),
+                XYZ(origin.X + direction.X * max_t, origin.Y + direction.Y * max_t, max_point.Z),
+            ),
+            first_wall[1], (bool(min_locked), bool(max_locked)),
+        ))
+    return merged, source_groups
 
 
 def _closest_target_thickness_ft(dist_ft, target_thicknesses_ft, tolerance_ft):
@@ -769,139 +854,6 @@ WALL_GRAPH_NODE_SNAP_TOLERANCE_FT = WALL_GRAPH_NODE_SNAP_TOLERANCE_M * FEET_PER_
 # arquivo) para esta secao ficar autocontida.
 WALL_GRAPH_PERPENDICULAR_TOLERANCE = 0.05
 WALL_GRAPH_COLLINEAR_TOLERANCE = 0.05
-
-# Paredes modeladas como elementos separados, mas alinhadas ponta a ponta,
-# formam um unico eixo de modulacao. A tolerancia lateral e' deliberadamente
-# menor que a de deduplicacao: aqui nao queremos absorver paredes paralelas
-# proximas, apenas pequenas imprecisoes de desenho no mesmo eixo. A folga
-# axial cobre apenas residuo de desenho, nao um vao fisico entre paredes.
-CONTINUOUS_WALL_AXIS_TOLERANCE_FT = 0.01 * FEET_PER_METER
-CONTINUOUS_WALL_GAP_TOLERANCE_FT = 0.01 * FEET_PER_METER
-CONTINUOUS_WALL_THICKNESS_TOLERANCE_FT = 0.005 * FEET_PER_METER
-
-
-def _line_interval_on_axis(line, origin, direction):
-    values = [
-        (XYZ(line.GetEndPoint(i).X, line.GetEndPoint(i).Y, 0.0) - origin).DotProduct(direction)
-        for i in (0, 1)
-    ]
-    return min(values), max(values)
-
-
-def _collinear_walls_are_continuous(wall_a, wall_b, axis_tolerance_ft,
-                                    gap_tolerance_ft):
-    line_a, thickness_a, _locks_a = wall_a
-    line_b, thickness_b, _locks_b = wall_b
-    if abs(thickness_a - thickness_b) > CONTINUOUS_WALL_THICKNESS_TOLERANCE_FT:
-        return False
-    if abs(line_a.GetEndPoint(0).Z - line_b.GetEndPoint(0).Z) > axis_tolerance_ft:
-        return False
-    if not are_lines_parallel(line_a, line_b):
-        return False
-    if get_distance_between_parallel_lines(line_a, line_b) > axis_tolerance_ft:
-        return False
-
-    p0 = line_a.GetEndPoint(0)
-    p1 = line_a.GetEndPoint(1)
-    origin = XYZ(p0.X, p0.Y, 0.0)
-    direction = (XYZ(p1.X, p1.Y, 0.0) - origin).Normalize()
-    a0, a1 = _line_interval_on_axis(line_a, origin, direction)
-    b0, b1 = _line_interval_on_axis(line_b, origin, direction)
-    gap = max(a0, b0) - min(a1, b1)
-    return gap <= gap_tolerance_ft
-
-
-def merge_connected_collinear_walls(
-        walls_to_create,
-        axis_tolerance_ft=CONTINUOUS_WALL_AXIS_TOLERANCE_FT,
-        gap_tolerance_ft=CONTINUOUS_WALL_GAP_TOLERANCE_FT,
-        source_keys=None):
-    """Consolida paredes colineares conectadas em um unico eixo continuo.
-
-    Devolve ``(merged_walls, source_groups)``. Cada item de ``source_groups``
-    contem os indices originais que deram origem ao eixo de mesmo indice em
-    ``merged_walls``. Isso permite que os fluxos do Revit preservem os
-    ElementIds reais, embora o solver enxergue uma parede unica e possa
-    posicionar um bloco atravessando a antiga divisa entre elementos.
-
-    Somente paredes paralelas, praticamente no mesmo eixo, de mesma espessura
-    e cujos intervalos se tocam/sobrepoem (ou tem uma folga minima) entram no
-    mesmo componente. Paredes perpendiculares nunca sao consolidadas: depois
-    desta etapa elas continuam sendo classificadas pelo grafo como L, T ou X
-    e seguem as regras de amarracao. Quando fornecido, ``source_keys`` deve
-    ter uma chave por parede e limita a consolidacao a paredes de mesma chave
-    (usado pela captura para nao unir alturas diferentes).
-    """
-    walls = list(walls_to_create or [])
-    if source_keys is not None and len(source_keys) != len(walls):
-        raise ValueError("source_keys deve ter uma chave por parede")
-    if len(walls) < 2:
-        return walls, [[i] for i in range(len(walls))]
-
-    parent = list(range(len(walls)))
-
-    def find(index):
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def union(a, b):
-        root_a, root_b = find(a), find(b)
-        if root_a != root_b:
-            parent[root_b] = root_a
-
-    for i in range(len(walls)):
-        for j in range(i + 1, len(walls)):
-            if source_keys is not None and source_keys[i] != source_keys[j]:
-                continue
-            if _collinear_walls_are_continuous(
-                    walls[i], walls[j], axis_tolerance_ft, gap_tolerance_ft):
-                union(i, j)
-
-    grouped = {}
-    for index in range(len(walls)):
-        grouped.setdefault(find(index), []).append(index)
-    source_groups = sorted(grouped.values(), key=lambda group: min(group))
-
-    merged = []
-    for group in source_groups:
-        if len(group) == 1:
-            merged.append(walls[group[0]])
-            continue
-
-        reference_idx = max(
-            group,
-            key=lambda idx: walls[idx][0].GetEndPoint(0).DistanceTo(
-                walls[idx][0].GetEndPoint(1)
-            )
-        )
-        reference_line = walls[reference_idx][0]
-        raw_p0 = reference_line.GetEndPoint(0)
-        raw_p1 = reference_line.GetEndPoint(1)
-        origin = XYZ(raw_p0.X, raw_p0.Y, 0.0)
-        direction = (XYZ(raw_p1.X, raw_p1.Y, 0.0) - origin).Normalize()
-
-        endpoints = []
-        for idx in group:
-            line, _thickness, locks = walls[idx]
-            for end_index in (0, 1):
-                point = line.GetEndPoint(end_index)
-                flat = XYZ(point.X, point.Y, 0.0)
-                endpoints.append(((flat - origin).DotProduct(direction), point, locks[end_index]))
-        min_t, min_point, min_locked = min(endpoints, key=lambda row: row[0])
-        max_t, max_point, max_locked = max(endpoints, key=lambda row: row[0])
-        z_value = min_point.Z
-        new_p0 = XYZ(origin.X + direction.X * min_t, origin.Y + direction.Y * min_t, z_value)
-        new_p1 = XYZ(origin.X + direction.X * max_t, origin.Y + direction.Y * max_t, z_value)
-        first_wall = walls[min(group)]
-        merged.append((
-            Line.CreateBound(new_p0, new_p1),
-            first_wall[1],
-            (bool(min_locked), bool(max_locked)),
-        ))
-
-    return merged, source_groups
 
 
 def _wall_node_arms(walls_to_create, junction_map=None):
@@ -1630,20 +1582,22 @@ def _project_opening_on_line(centerline, op):
 
 
 def _merge_opening_matches(matches):
-    """Ordena e remove apenas duplicatas geometricamente equivalentes.
-
-    A antiga uniao por sobreposicao horizontal transformava duas aberturas
-    em alturas diferentes num unico vazio do menor peitoril ate a maior
-    verga. A decomposicao 2D de ``build_wall_segments`` lida com retangulos
-    sobrepostos sem precisar aumentar o vazio real.
-    """
-    ordered = sorted(matches, key=lambda m: (m[0], m[1], m[2], m[3]))
-    unique = []
-    for row in ordered:
-        if unique and all(abs(row[i] - unique[-1][i]) <= 1e-9 for i in range(4)):
-            continue
-        unique.append(row)
-    return unique
+    """Ordena por t_lo e mescla intervalos horizontais sobrepostos (uniao
+    do trecho horizontal, min/max da faixa vertical) - para nao gerar
+    segmentos de parede invalidos/duplicados em build_wall_segments quando
+    duas aberturas ficam muito proximas uma da outra na mesma parede."""
+    ordered = sorted(matches, key=lambda m: m[0])
+    merged = []
+    for t_lo, t_hi, sill_z, head_z in ordered:
+        if merged and t_lo <= merged[-1][1] + MIN_SEGMENT_LENGTH_FT:
+            prev_lo, prev_hi, prev_sill, prev_head = merged[-1]
+            merged[-1] = (
+                prev_lo, max(prev_hi, t_hi),
+                min(prev_sill, sill_z), max(prev_head, head_z)
+            )
+        else:
+            merged.append((t_lo, t_hi, sill_z, head_z))
+    return merged
 
 
 def find_openings_on_line(centerline, thickness_ft, openings):
@@ -1807,42 +1761,36 @@ def build_wall_segments(centerline, base_z_abs, wall_height_ft, openings_on_line
     normalized = []
     x_breaks = [0.0, length_ft]
     for t_lo, t_hi, sill_z_abs, head_z_abs in openings_on_line:
-        lo = max(0.0, min(length_ft, t_lo))
-        hi = max(0.0, min(length_ft, t_hi))
+        lo, hi = max(0.0, min(length_ft, t_lo)), max(0.0, min(length_ft, t_hi))
         sill = max(base_z_abs, min(top_z_abs, sill_z_abs))
         head = max(base_z_abs, min(top_z_abs, head_z_abs))
         if hi - lo <= MIN_SEGMENT_LENGTH_FT or head - sill <= MIN_SEGMENT_HEIGHT_FT:
             continue
         normalized.append((lo, hi, sill, head))
         x_breaks.extend((lo, hi))
-
     if not normalized:
         return [(centerline, wall_height_ft, 0.0, "cad")]
 
-    x_breaks = sorted(set(round(value, 9) for value in x_breaks))
     segments = []
+    x_breaks = sorted(set(round(value, 9) for value in x_breaks))
     for index in range(len(x_breaks) - 1):
         t_a, t_b = x_breaks[index], x_breaks[index + 1]
         if t_b - t_a <= MIN_SEGMENT_LENGTH_FT:
             continue
         mid_t = (t_a + t_b) / 2.0
-        voids = sorted(
-            (sill, head) for lo, hi, sill, head in normalized
-            if lo - 1e-9 <= mid_t <= hi + 1e-9
-        )
+        voids = sorted((sill, head) for lo, hi, sill, head in normalized
+                       if lo - 1e-9 <= mid_t <= hi + 1e-9)
         merged_voids = []
         for sill, head in voids:
             if merged_voids and sill <= merged_voids[-1][1] + 1e-9:
                 merged_voids[-1] = (merged_voids[-1][0], max(merged_voids[-1][1], head))
             else:
                 merged_voids.append((sill, head))
-
         if not merged_voids:
             seg = make_horizontal_full_segment(t_a, t_b)
             if seg:
                 segments.append(seg)
             continue
-
         cursor_z = base_z_abs
         for sill, head in merged_voids:
             seg = make_infill_segment(t_a, t_b, cursor_z, sill)
@@ -1852,5 +1800,4 @@ def build_wall_segments(centerline, base_z_abs, wall_height_ft, openings_on_line
         seg = make_infill_segment(t_a, t_b, cursor_z, top_z_abs)
         if seg:
             segments.append(seg)
-
     return segments

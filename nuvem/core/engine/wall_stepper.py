@@ -79,9 +79,12 @@ __all__ = [
     "_pier_first_block_candidates", "_nearest_cell_to_point",
     "_jamb_build_course_variants", "solve_opening_jamb", "solve_all_opening_jambs",
     "describe_opening_jamb_exception", "_pier_codes_by_len_desc",
-    "_greedy_fill_blocks", "_merge_adjacent_compensator_pairs",
+    "_greedy_fill_blocks", "_greedy_fill_blocks_any_first", "_exact_fill_blocks",
+    "_merge_adjacent_compensator_pairs",
     "_pier_remaining_snapped_cm", "_pier_ordered_layout",
     "_layout_internal_joint_positions_cm", "_count_joint_coincidences_cm",
+    "_layout_min_joint_stagger_cm", "MIN_JOINT_STAGGER_TARGET_CM",
+    "OPENING_ALIGNED_EXEMPT_CODES", "_layout_compensator_run_excess",
     "_block_void_offsets_cm", "_layout_void_positions_cm", "_count_void_alignment_cm",
     "_half_block_leading_layout", "_pier_forced_bypass_layouts",
     "_pier_layout_avoiding_joints", "_place_pier_layout",
@@ -2361,14 +2364,19 @@ def describe_opening_jamb_exception(result):
 # blocos no meio do trecho.
 HALF_BLOCK_CODE = "B19"
 
-# Codigo do bloco de amarracao especial (14x19x34cm). Mantido como constante
-# publica por compatibilidade, mas reservado aos solvers de encontro L/T.
-# Ele nunca entra no preenchimento comum nem fecha sobra de parede.
+# Codigo do bloco de amarracao especial (14x19x34cm) quando usado no
+# PREENCHIMENTO COMUM de um trecho (nao so' em encontros L/T/X, onde ja era
+# usado). Pedido explicito do usuario (2026-08-21): "o bloco de 34cm
+# tambem pode ser utilizado no meio de uma parede... para reduzir o uso de
+# compensadores", com prioridade B39 -> B19 -> B34 -> compensadores.
 MID_WALL_BLOCK_CODE = "B34"
 
-# Pool unico do preenchimento comum e dos jambs. B34/B54 nao aparecem aqui:
-# sao reservados e posicionados exclusivamente pelos solvers de encontro.
-COMMON_FILL_BLOCK_CODES = OPENING_JAMB_BLOCK_CODES
+# Pool de codigos que o preenchimento comum (_pier_ordered_layout) pode
+# usar - OPENING_JAMB_BLOCK_CODES (B39/B19/C09/C04, tambem usado pelos
+# jambs de abertura) MAIS o B34 de meio-de-parede acima. Um pool proprio
+# (nao altera OPENING_JAMB_BLOCK_CODES) para nao mudar o comportamento dos
+# jambs, que o usuario nao pediu para alterar.
+COMMON_FILL_BLOCK_CODES = OPENING_JAMB_BLOCK_CODES + (MID_WALL_BLOCK_CODE,)
 
 # Quantos compensadores/pastilhas (C09/C04) um UNICO trecho pode usar antes
 # de ser considerado "uma fileira repetitiva" - pedido explicito do usuario
@@ -2398,68 +2406,157 @@ def _pier_codes_by_len_desc(catalog, allow_compensators, exclude=(), pool=OPENIN
 
 
 def _greedy_fill_blocks(remaining, pos_cm, catalog, codes_by_len_desc, first_code=None):
-    """Melhor composicao exata para o pool, por programacao dinamica.
-
-    A pontuacao e' lexicografica: menos compensadores, menos pastilhas,
-    menos meios-blocos, menos pecas e mais B39. Assim o solver avalia as
-    combinacoes possiveis em vez de aceitar a primeira que fecha. O nome
-    historico foi mantido para nao quebrar os chamadores existentes.
-    `first_code`, quando pertence ao pool, continua sendo uma restricao
-    dura usada pela busca de desencontro entre fiadas.
-    """
+    """Nucleo guloso (MAIOR bloco do pool que ainda cabe a cada passo):
+    preenche `remaining` cm (ja' na convencao de `_pier_ordered_layout` -
+    cada peca "carrega" sua propria junta de saida) a partir da posicao
+    `pos_cm`, devolvendo a lista ORDENADA [(codigo, start_cm, end_cm), ...]
+    ou None se o `codes_by_len_desc` dado nao fechar esse resto
+    EXATAMENTE. `first_code` (quando presente no pool) forca o primeiro
+    bloco escolhido. Extraida de `_pier_ordered_layout` para ser reusada
+    tanto na tentativa "sem meio-bloco" quanto nos dois lados de uma
+    sequencia que teve o meio-bloco reservado manualmente numa ponta (ver
+    `_pier_ordered_layout`)."""
     if remaining <= 1e-6:
         return []
     if not codes_by_len_desc:
         return None
-
-    snapped_units = int(round(remaining / float(PIER_MODULE_CM)))
-    if abs(remaining - snapped_units * PIER_MODULE_CM) > PIER_LAYOUT_TOLERANCE_CM:
-        return None
-
-    prefix = []
-    if first_code in codes_by_len_desc:
-        first_length = float(catalog[first_code]["length_cm"])
-        first_step = first_length + BLOCK_JOINT_CM
-        if first_step > remaining + PIER_LAYOUT_TOLERANCE_CM:
+    layout = []
+    pending_first = first_code if first_code in codes_by_len_desc else None
+    guard = 0
+    while remaining > 1e-6:
+        guard += 1
+        if guard > 10000:
+            return None  # protecao - nao deveria acontecer (prova da secao 3)
+        chosen = None
+        if pending_first is not None:
+            if catalog[pending_first]["length_cm"] + BLOCK_JOINT_CM <= remaining + 1e-6:
+                chosen = pending_first
+            pending_first = None
+        if chosen is None:
+            for code in codes_by_len_desc:
+                if catalog[code]["length_cm"] + BLOCK_JOINT_CM <= remaining + 1e-6:
+                    chosen = code
+                    break
+        if chosen is None:
             return None
-        prefix.append((first_code, pos_cm, pos_cm + first_length))
-        pos_cm += first_step
-        snapped_units -= int(round(first_step / float(PIER_MODULE_CM)))
-    if snapped_units < 0:
-        return None
-
-    def piece_score(code):
-        entry = catalog.get(code) or {}
-        return (
-            1 if entry.get("is_compensator") else 0,
-            1 if code == "C04" else 0,
-            1 if code == HALF_BLOCK_CODE else 0,
-            1,
-            -1 if code == "B39" else 0,
-        )
-
-    best = [None] * (snapped_units + 1)
-    best[0] = ((0, 0, 0, 0, 0), [])
-    for units in range(1, snapped_units + 1):
-        for code in codes_by_len_desc:
-            step_cm = float(catalog[code]["length_cm"]) + BLOCK_JOINT_CM
-            step_units = int(round(step_cm / float(PIER_MODULE_CM)))
-            if step_units <= 0 or step_units > units or best[units - step_units] is None:
-                continue
-            previous_score, previous_codes = best[units - step_units]
-            own_score = piece_score(code)
-            score = tuple(previous_score[i] + own_score[i] for i in range(len(own_score)))
-            candidate = (score, previous_codes + [code])
-            if best[units] is None or candidate[0] < best[units][0]:
-                best[units] = candidate
-
-    if best[snapped_units] is None:
-        return None
-    layout = list(prefix)
-    for code in best[snapped_units][1]:
-        block_cm = float(catalog[code]["length_cm"])
-        layout.append((code, pos_cm, pos_cm + block_cm))
+        block_cm = catalog[chosen]["length_cm"]
+        layout.append((chosen, pos_cm, pos_cm + block_cm))
         pos_cm += block_cm + BLOCK_JOINT_CM
+        remaining -= block_cm + BLOCK_JOINT_CM
+    return layout
+
+
+def _greedy_fill_blocks_any_first(remaining, pos_cm, catalog, codes_by_len_desc, first_code=None):
+    """`_greedy_fill_blocks` com uma segunda chance: quando o guloso PURO
+    nao fecha o resto exatamente (e o chamador nao impos um `first_code`),
+    tenta cada codigo do pool como PRIMEIRO bloco antes de desistir.
+
+    Motivo (bug real medido ao vivo via MCP, 2026-08-28): o guloso pega
+    sempre a maior peca que ainda cabe e nunca volta atras, entao ele
+    falha em trechos que SO' fecham com uma peca menor mais cedo. Caso
+    real, trecho de 469cm entre dois encontros (pool B39+B34, tier 3):
+    o guloso puro poe 11xB39, sobra 29cm, o B34 nao cabe mais e o tier 3
+    inteiro devolve None - a parede caia no tier 5 e fechava com
+    `11xB39 + 3xC09`, TRES compensadores em sequencia, reprovada em
+    seguida pela regra #2. Bastava comecar por um B34: `B34 + 10xB39 +
+    B34` fecha os mesmos 469cm com ZERO compensadores. (Existem 5
+    composicoes sem compensador nenhum para esse trecho; o guloso puro
+    nao achava nenhuma.)
+
+    Nao altera nenhum caso em que o guloso puro ja' fecha - so' amplia o
+    alcance dos tiers BONS de `_pier_ordered_layout`, evitando que eles
+    caiam para um tier pior sem necessidade.
+
+    Variar o primeiro bloco cobre muitos casos, mas nao todos: 139cm fecha
+    com QUATRO B34 e nenhum B39, e nenhuma escolha de primeiro bloco leva
+    o guloso ate' la'. Por isso, se nem isso fechar, cai para
+    `_exact_fill_blocks` (busca exata)."""
+    layout = _greedy_fill_blocks(remaining, pos_cm, catalog, codes_by_len_desc, first_code)
+    if layout is not None or first_code is not None:
+        return layout
+    for code in codes_by_len_desc:
+        alt = _greedy_fill_blocks(remaining, pos_cm, catalog, codes_by_len_desc, code)
+        if alt is not None:
+            return alt
+    return _exact_fill_blocks(remaining, pos_cm, catalog, codes_by_len_desc)
+
+
+# Passo de discretizacao da busca exata: decimos de centimetro. Todas as
+# medidas do catalogo e das juntas sao multiplos de 0,1cm na pratica, e
+# trabalhar em inteiros evita erro de ponto flutuante acumulado na soma.
+_EXACT_FILL_SCALE = 10
+# Teto de seguranca do vetor de programacao dinamica (decimos de cm): 40m
+# de trecho e' muito acima de qualquer parede real deste projeto.
+_EXACT_FILL_MAX_STEPS = 40000
+
+
+def _exact_fill_blocks(remaining, pos_cm, catalog, codes_by_len_desc):
+    """Busca EXATA (programacao dinamica) de uma composicao que feche
+    `remaining` exatamente com os codigos de `codes_by_len_desc`, na mesma
+    convencao de `_greedy_fill_blocks` (cada peca carrega sua propria junta
+    de saida). Devolve o layout ORDENADO [(codigo, start_cm, end_cm), ...]
+    ou None quando nenhuma combinacao fecha.
+
+    Criterio: MENOS pecas primeiro (o que naturalmente prefere as pecas
+    maiores, mesma intencao do guloso), desempatando pela peca mais longa.
+    As pecas saem ordenadas da maior para a menor - a mesma "cara" que o
+    guloso produz, para nao mudar o formato dos layouts que ja' funcionam;
+    quando a ordem importa para o desencontro entre fiadas,
+    `_pier_layout_avoiding_joints` ja' explora as alternativas por cima
+    disto.
+
+    Existe porque o guloso nunca volta atras (ver
+    `_greedy_fill_blocks_any_first`): medido ao vivo via MCP em 2026-08-28,
+    33 eixos de um projeto real eram reprovados pela regra #2
+    (compensadores em sequencia) tendo TODOS uma composicao limpa
+    disponivel - por exemplo 139cm = 4xB34, que nenhuma escolha de
+    primeiro bloco alcanca."""
+    steps = []
+    for code in codes_by_len_desc:
+        entry = catalog.get(code)
+        if not entry:
+            continue
+        passo = int(round((entry["length_cm"] + BLOCK_JOINT_CM) * _EXACT_FILL_SCALE))
+        if passo > 0:
+            steps.append((passo, code, entry["length_cm"]))
+    if not steps:
+        return None
+    alvo = int(round(remaining * _EXACT_FILL_SCALE))
+    if alvo <= 0 or alvo > _EXACT_FILL_MAX_STEPS:
+        return None
+
+    # dp[v] = (n_pecas, comprimento_da_peca_escolhida, code, passo) da
+    # melhor solucao para exatamente `v` decimos; None = inalcancavel.
+    dp = [None] * (alvo + 1)
+    dp[0] = (0, 0.0, None, 0)
+    for v in range(1, alvo + 1):
+        melhor = None
+        for passo, code, comp_cm in steps:
+            if passo > v:
+                continue
+            anterior = dp[v - passo]
+            if anterior is None:
+                continue
+            cand = (anterior[0] + 1, -comp_cm)
+            if melhor is None or cand < (melhor[0], -melhor[1]):
+                melhor = (anterior[0] + 1, comp_cm, code, passo)
+        dp[v] = melhor
+    if dp[alvo] is None:
+        return None
+
+    escolhidos = []
+    v = alvo
+    while v > 0:
+        _n, comp_cm, code, passo = dp[v]
+        escolhidos.append((code, comp_cm))
+        v -= passo
+    escolhidos.sort(key=lambda it: -it[1])
+
+    layout = []
+    pos = pos_cm
+    for code, comp_cm in escolhidos:
+        layout.append((code, pos, pos + comp_cm))
+        pos += comp_cm + BLOCK_JOINT_CM
     return layout
 
 
@@ -2583,18 +2680,54 @@ def _pier_ordered_layout(pier_cm, catalog, leading_joint_cm, trailing_joint_cm,
     BLOCK_OPENING_JOINT_CM (0) quando o lado encosta numa abertura ou e'
     uma ponta livre de parede.
 
-    Prioridade oficial, em ordem, sem aceitar uma composicao invalida como
-    fallback visual:
+    Greedy MAIOR-bloco-que-ainda-cabe a cada passo (ver `_greedy_fill_blocks`):
+    sempre valido enquanto o resto ficar >= 0 e multiplo de PIER_MODULE_CM,
+    porque QUALQUER multiplo de 5 e' construivel com o catalogo padrao
+    (prova na secao 3 do prompt) - entao o resto nunca fica "preso" num
+    valor sem solucao.
+
+    PRIORIDADE COMPLETA (pedido explicito do usuario, 2026-08-21, revisada
+    apos ver o resultado real no Revit; tiers 5/6 TROCADOS DE ORDEM em
+    2026-08-25 - ver o comentario junto do tier 5 abaixo): "blocos
+    inteiros -> meio bloco de 19cm numa ponta ABERTA -> bloco de 34cm ->
+    compensadores/pastilhas -> meio bloco fora de ponta aberta, so' como
+    ULTIMISSIMO recurso". Cada tier so' e' tentado se o(s) anterior(es)
+    nao fecharem:
       1. So' B39 (nem B19, nem B34, nem compensador).
       2. 1 UNICO B19, encostado numa ponta ABERTA do trecho (abertura ou
          extremidade sem amarracao - junta de contorno 0 daquele lado),
          preenchendo o resto so' com B39 (tenta a ponta de ENTRADA
          primeiro, depois a de SAIDA - ver HALF_BLOCK_CODE).
-      3. B39 + no maximo um C09/C04.
-      4. B19 em ponta aberta + B39 + no maximo um C09/C04.
-
-    B34/B54 sao exclusivos dos solvers de encontro. Se nenhum nivel fecha,
-    devolve None para o pipeline ajustar a geometria ou reportar o trecho.
+      3. B39 + B34 (sem B19, sem compensador) - o B34 pode cair em
+         QUALQUER posicao do trecho, inclusive no meio (diferente do B19).
+         ATENCAO - LIMITACAO CONHECIDA: esta funcao NAO alinha ainda a
+         celula do B34 desta fiada com a da fiada oposta (regra do vao
+         menor/vao maior entre 1a/2a fiada que o usuario pediu) - a
+         orientacao usada aqui e' so' uma convencao fixa (ver
+         _place_pier_layout/_asymmetric_bond_origin_and_axis). Alinhamento
+         cruzado entre fiadas fica para uma proxima etapa.
+      4. 1 UNICO B19 numa ponta ABERTA, mas preenchendo o resto com B39+B34
+         (ainda sem compensador).
+      5. B39 (+B34 se precisar) + no maximo MAX_COMPENSATORS_PER_TRECHO
+         compensador(es)/pastilha(s) - pedido explicito do usuario:
+         "extremamente proibido... duas pastilhas ou combinacoes
+         consecutivas de compensadores... usados apenas de forma pontual,
+         nunca em sequencia".
+      6. 1 UNICO B19 MESMO SEM ponta aberta - ULTIMISSIMO recurso "limpo"
+         (0 ou 1 compensador), so' tentado se nem o tier 5 (compensador)
+         fechou. TROCADO DE LUGAR com o tier de compensador em 2026-08-25
+         (pedido explicito do usuario): "o meio bloco deve ser priorizado
+         EXCLUSIVAMENTE em situacoes relacionadas as aberturas... nao
+         utilizar meio bloco para simplesmente corrigir uma modulacao ruim
+         nem como recurso para fechar uma amarracao" - antes disto, B19
+         SEM ponta aberta (ou seja, exatamente contra um no' L/T/X) vinha
+         ANTES do compensador na prioridade; um trecho entre dois
+         encontros que so' fechava aqui (nem tier 1-4) preferia colocar um
+         B19 encostado no proprio no' de amarracao a usar 1 compensador -
+         a violacao literal da regra #2 que o usuario reportou.
+      7. Ultimo recurso irrestrito (qualquer posicao, qualquer contagem) -
+         preferir uma solucao "feia" a reportar NON_MODULAR_WALL quando
+         ela existe.
 
     `first_code`, se dado, forca o PRIMEIRO bloco (usado por
     `_pier_layout_avoiding_joints` para tentar desencontrar juntas entre
@@ -2632,6 +2765,7 @@ def _pier_ordered_layout(pier_cm, catalog, leading_joint_cm, trailing_joint_cm,
         return None
     is_comp = lambda code: catalog.get(code, {}).get("is_compensator")  # noqa: E731
     plain_codes = [c for c in all_codes if c != HALF_BLOCK_CODE and c != MID_WALL_BLOCK_CODE and not is_comp(c)]
+    codes_b34 = [c for c in all_codes if c != HALF_BLOCK_CODE and not is_comp(c)]
     codes_no_half = [c for c in all_codes if c != HALF_BLOCK_CODE]
 
     def _compensator_count(layout):
@@ -2663,6 +2797,14 @@ def _pier_ordered_layout(pier_cm, catalog, leading_joint_cm, trailing_joint_cm,
         start = head[-1][2] + BLOCK_JOINT_CM if head else leading_joint_cm
         return head + [(HALF_BLOCK_CODE, start, start + half_cm)]
 
+    def _half_anywhere_leading(fill_pool):
+        if half_step is None or half_step > remaining + 1e-6:
+            return None
+        tail = _greedy_fill_blocks(remaining - half_step, leading_joint_cm + half_step, catalog, fill_pool, None)
+        if tail is None:
+            return None
+        return [(HALF_BLOCK_CODE, leading_joint_cm, leading_joint_cm + half_cm)] + tail
+
     half_first_requested = first_code == HALF_BLOCK_CODE
     plain_first_code = None if half_first_requested else first_code
 
@@ -2686,8 +2828,23 @@ def _pier_ordered_layout(pier_cm, catalog, leading_joint_cm, trailing_joint_cm,
     if layout is not None:
         return _finish(layout)
 
-    # 3) B39 + no maximo MAX_COMPENSATORS_PER_TRECHO compensador/pastilha.
-    #    B34 fica reservado a amarracao e B19 so' pode estar em ponta aberta.
+    # 3) B39 + B34 (sem B19, sem compensador) - B34 pode ir em qualquer
+    #    posicao (ver LIMITACAO no docstring: alinhamento entre fiadas
+    #    ainda nao aplicado aqui). `_any_first` (2026-08-28): quando o
+    #    guloso puro nao fecha, varia o primeiro bloco antes de descer de
+    #    tier - sem isso um trecho que fecha com `B34 + 10xB39 + B34` caia
+    #    para o tier 5 e virava `11xB39 + 3xC09`.
+    layout = _greedy_fill_blocks_any_first(remaining, leading_joint_cm, catalog,
+                                           codes_b34, plain_first_code)
+    if layout is not None:
+        return _finish(layout)
+
+    # 4) 1 B19 numa ponta ABERTA, resto com B39+B34.
+    layout = _half_at_leading(codes_b34) or _half_at_trailing(codes_b34)
+    if layout is not None:
+        return _finish(layout)
+
+    # 5) B39 (+B34) + no maximo MAX_COMPENSATORS_PER_TRECHO compensador(es) -
     #    so' chega aqui quando NENHUMA combinacao sem compensador fechou.
     #    A fusao (_finish) roda ANTES da checagem do teto: 9+9 vira 19
     #    (0 compensadores) e pode passar a caber dentro do teto mesmo
@@ -2695,23 +2852,31 @@ def _pier_ordered_layout(pier_cm, catalog, leading_joint_cm, trailing_joint_cm,
     #    ponta-aberta (tier 6, ver comentario la' e no docstring) - regra
     #    #2 do usuario (2026-08-25): meio bloco nunca e' o recurso pra
     #    fechar uma amarracao quando um compensador resolve.
-    layout_with_comp = _greedy_fill_blocks(remaining, leading_joint_cm, catalog, codes_no_half, plain_first_code)
+    layout_with_comp = _greedy_fill_blocks_any_first(remaining, leading_joint_cm, catalog,
+                                                     codes_no_half, plain_first_code)
     if layout_with_comp is not None:
         merged_with_comp = _finish(layout_with_comp)
         if _compensator_count(merged_with_comp) <= MAX_COMPENSATORS_PER_TRECHO:
             return merged_with_comp
 
-    # 4) B19 numa ponta aberta + preenchimento regular com no maximo uma
-    #    peca de excecao. Nunca forca B19 contra encontro fechado.
-    layout = _half_at_leading(codes_no_half) or _half_at_trailing(codes_no_half)
-    if layout is not None:
-        merged = _finish(layout)
-        if _compensator_count(merged) <= MAX_COMPENSATORS_PER_TRECHO:
-            return merged
+    # 6) 1 B19 mesmo SEM ponta aberta (ou seja, exatamente contra um no'
+    #    L/T/X) - ULTIMISSIMO recurso "limpo", so' tentado se nem o
+    #    compensador (tier 5) fechou dentro do teto. Tenta a ponta de
+    #    entrada por padrao, so' para ter uma posicao definida (nao ha'
+    #    ponta "certa" quando nenhuma e' aberta).
+    layout_forced_half = _half_anywhere_leading(codes_b34)
+    if layout_forced_half is not None:
+        return _finish(layout_forced_half)
 
-    # Nao existe fallback irrestrito. Se as regras nao fecham o trecho,
-    # ele deve ser reportado e ajustado pelo pipeline geometrico.
-    return None
+    # 7) fica com o "com compensadores" (ja' fundido) mesmo acima do teto,
+    #    se existir - sempre melhor que reportar NON_MODULAR sem precisar.
+    if layout_with_comp is not None:
+        return merged_with_comp
+
+    # 8) ultimo recurso irrestrito (B19 em qualquer posicao, qualquer
+    #    contagem de compensadores).
+    layout_last_resort = _greedy_fill_blocks(remaining, leading_joint_cm, catalog, all_codes, first_code)
+    return _finish(layout_last_resort) if layout_last_resort is not None else None
 
 
 VERTICAL_JOINT_STAGGER_TOLERANCE_CM = 1.0  # secao 6: juntas mais proximas que
@@ -2719,16 +2884,46 @@ VERTICAL_JOINT_STAGGER_TOLERANCE_CM = 1.0  # secao 6: juntas mais proximas que
 # junta vertical continua" entre Fiada A e Fiada B.
 
 
-def _layout_internal_joint_positions_cm(layout, seg_start_cm):
+# Pecas de FECHAMENTO pequenas cuja junta contra o vizinho NAO conta como
+# junta vertical continua quando elas estao encostadas numa ABERTURA (regra
+# do usuario, 2026-08-28, a partir de uma parede modulada a mao: "os blocos
+# B4, B9 e B19 podem ficar alinhados quando estao encostados nas aberturas,
+# principalmente o b4 e o b9"). Ver EXCECAO na secao 11 de
+# REGRAS_MODULACAO_BLOCOS.md.
+OPENING_ALIGNED_EXEMPT_CODES = ("C04", "C09", "B19")
+
+
+def _layout_internal_joint_positions_cm(layout, seg_start_cm,
+                                        leading_is_open=False, trailing_is_open=False):
     """Posicao absoluta (cm, ao longo do eixo da parede) do CENTRO de cada
     junta INTERNA de `layout` (a lista devolvida por _pier_ordered_layout) -
     isto e', as juntas entre dois blocos consecutivos do mesmo trecho, sem
     contar as juntas de CONTORNO (contra abertura/no'/ponta livre, essas nao
     sao "verticais continuas entre fiadas" no sentido da secao 6). `layout`
     guarda posicoes relativas ao inicio do trecho (pos_cm comeca em
-    leading_joint_cm) - `seg_start_cm` converte para absoluto na parede."""
+    leading_joint_cm) - `seg_start_cm` converte para absoluto na parede.
+
+    `leading_is_open`/`trailing_is_open`: quando a ponta correspondente do
+    trecho e' uma ABERTURA (nao um no' de amarracao), a junta que separa a
+    peca de fechamento dessa ponta do seu vizinho e' OMITIDA da lista -
+    isto e', deixa de contar como coincidencia de junta vertical entre
+    fiadas - desde que essa peca seja uma das
+    `OPENING_ALIGNED_EXEMPT_CODES` (C04/C09/B19). E' a EXCECAO a' regra #1
+    pedida pelo usuario (2026-08-28): pastilha/compensador/meio-bloco
+    encostados no vao PODEM ficar alinhados entre a Fiada A e a Fiada B.
+    Os defaults `False` preservam exatamente o comportamento anterior para
+    todo chamador que ainda nao informa as pontas."""
     joints = []
-    for i in range(len(layout) - 1):
+    n = len(layout)
+    for i in range(n - 1):
+        # Junta i separa layout[i] de layout[i+1]. Ela e' isenta quando a
+        # peca ENCOSTADA na ponta aberta e' pequena (C04/C09/B19): na ponta
+        # inicial isso e' layout[0] (junta 0); na final, layout[-1] (junta
+        # n-2).
+        if i == 0 and leading_is_open and layout[0][0] in OPENING_ALIGNED_EXEMPT_CODES:
+            continue
+        if i == n - 2 and trailing_is_open and layout[-1][0] in OPENING_ALIGNED_EXEMPT_CODES:
+            continue
         gap_center_local = layout[i][2] + BLOCK_JOINT_CM / 2.0
         joints.append(seg_start_cm + gap_center_local)
     return joints
@@ -2876,7 +3071,7 @@ def _half_block_leading_layout(pier_cm, catalog, leading_joint_cm, trailing_join
         return None
     is_comp = lambda code: catalog.get(code, {}).get("is_compensator")  # noqa: E731
     plain_codes = [c for c in all_codes if c != MID_WALL_BLOCK_CODE and not is_comp(c)]
-    regular_codes = [c for c in all_codes if not is_comp(c)]
+    codes_b34 = [c for c in all_codes if not is_comp(c)]
 
     def _lead(head_and_tail):
         # Fusao de compensadores (secao 2, ver _merge_adjacent_compensator_
@@ -2898,19 +3093,24 @@ def _half_block_leading_layout(pier_cm, catalog, leading_joint_cm, trailing_join
     if tail is not None:
         return _lead(tail)
 
-    # 2) B39 + 1 segundo B19 fechando a PONTA FINAL - so' quando essa
+    # 2) B39 + B34.
+    tail = _greedy_fill_blocks(tail_remaining, tail_pos, catalog, codes_b34)
+    if tail is not None:
+        return _lead(tail)
+
+    # 3) B39 (+B34) + 1 segundo B19 fechando a PONTA FINAL - so' quando essa
     #    ponta e' aberta de verdade (senao um B19 apareceria contra um no'
     #    L/T/X, a mesma regressao que motivou esta funcao ganhar o
     #    parametro `trailing_is_open`).
     if trailing_is_open:
         inner_remaining = tail_remaining - half_step
         if inner_remaining >= -PIER_LAYOUT_TOLERANCE_CM:
-            head = _greedy_fill_blocks(max(0.0, inner_remaining), tail_pos, catalog, regular_codes)
+            head = _greedy_fill_blocks(max(0.0, inner_remaining), tail_pos, catalog, codes_b34)
             if head is not None:
                 start = head[-1][2] + BLOCK_JOINT_CM if head else tail_pos
                 return _lead(head + [(HALF_BLOCK_CODE, start, start + half_cm)])
 
-    # 3) B39 + no maximo MAX_COMPENSATORS_PER_TRECHO compensador/pastilha.
+    # 4) B39 (+B34) + no maximo MAX_COMPENSATORS_PER_TRECHO compensador(es) -
     #    checagem do teto DEPOIS da fusao (mesmo raciocinio do tier 6 de
     #    _pier_ordered_layout: 9+9 vira 19 antes de contar).
     tail = _greedy_fill_blocks(tail_remaining, tail_pos, catalog, all_codes)
@@ -2928,12 +3128,7 @@ def _pier_forced_bypass_layouts(pier_cm, catalog, leading_joint_cm, trailing_joi
                                 leading_is_open=True, trailing_is_open=True):
     """Layouts adicionais para a busca de amarracao de `_pier_layout_
     avoiding_joints` que `_pier_ordered_layout(first_code=...)` sozinho
-    nao alcanca. REGRA ATUAL: o pool recebido nao contem B34; somente uma
-    excecao C09/C04 pode ser forcada e o teto continua bloqueante. As notas
-    historicas abaixo explicam a origem desta busca, mas a antiga variante
-    com B34 foi retirada por ele ser exclusivo de encontros.
-
-    CAUSA-RAIZ corrigida (2026-08-25) da maioria das juntas
+    NUNCA alcanca. CAUSA-RAIZ corrigida (2026-08-25) da maioria das juntas
     verticais corridas medidas numa execucao real (paredes inteiras com a
     MESMA junta repetida em todas as 15 fiadas): `_pier_ordered_layout`
     tenta seus proprios tiers em ORDEM FIXA (1: so' B39; 3: B39+B34; 6: +1
@@ -2995,7 +3190,10 @@ def _pier_forced_bypass_layouts(pier_cm, catalog, leading_joint_cm, trailing_joi
     codes_no_half = [c for c in all_codes if c != HALF_BLOCK_CODE]
 
     def _forced_first(first_code):
-        # A continuacao usa o mesmo pool legal (B39/C09/C04), sem B19/B34.
+        # `codes_no_half` (nao so' B34/B39) na CONTINUACAO tambem, nao so'
+        # no primeiro bloco - e' o que permite o guloso encontrar sozinho
+        # o "sobra exatamente 5cm -> 1 C04" da prova acima, sem precisar
+        # calcular a aritmetica na mao aqui.
         if first_code not in codes_no_half:
             return None
         layout = _greedy_fill_blocks(remaining, leading_joint_cm, catalog, codes_no_half,
@@ -3009,6 +3207,9 @@ def _pier_forced_bypass_layouts(pier_cm, catalog, leading_joint_cm, trailing_joi
         return merged
 
     out = []
+    alt = _forced_first(MID_WALL_BLOCK_CODE)
+    if alt is not None:
+        out.append(alt)
     if allow_compensators:
         for comp_code in all_codes:
             if not is_comp(comp_code):
@@ -3017,6 +3218,75 @@ def _pier_forced_bypass_layouts(pier_cm, catalog, leading_joint_cm, trailing_joi
             if alt is not None:
                 out.append(alt)
     return out
+
+
+def _layout_compensator_run_excess(layout, catalog):
+    """Quanto `layout` viola a regra #2 (secao 2 de
+    REGRAS_MODULACAO_BLOCOS.md: "proibido usar 2 ou mais compensadores em
+    sequencia no mesmo trecho"): 0 quando nenhuma sequencia passa de UM
+    compensador; senao a soma dos EXCEDENTES de cada sequencia (dois
+    seguidos -> 1, quatro seguidos -> 3). Medida continua de propositio,
+    para a busca preferir a MENOR violacao quando toda alternativa viola.
+
+    Usada como criterio PRIMARIO em `_pier_layout_avoiding_joints` (bug
+    real medido ao vivo via MCP, 2026-08-28): sem ela, `_score` so' olhava
+    coincidencia de junta, e um candidato como `C04+C09+C09+C04` (QUATRO
+    compensadores seguidos) vencia o baseline `B19+C09` so' por
+    desencontrar a junta - um layout que `validate_wall_modulation` reprova
+    logo em seguida em `sem_compensadores_consecutivos`. Trocar uma junta
+    coincidente (que o pipeline registra em `alignment_conflicts` e escala
+    para ajuste geometrico) por uma parede REPROVADA nunca e' um bom
+    negocio."""
+    excess = 0
+    run = 0
+    for item in layout or []:
+        entry = (catalog or {}).get(item[0]) or {}
+        if entry.get("is_compensator"):
+            run += 1
+        else:
+            excess += max(0, run - 1)
+            run = 0
+    return excess + max(0, run - 1)
+
+
+# Afastamento (cm) que se BUSCA entre uma junta desta fiada e a junta mais
+# proxima da fiada oposta - o "travamento" vertical do prisma. Nao e' um
+# bloqueio: e' o alvo a partir do qual a composicao ja' e' considerada boa o
+# bastante, usado como criterio de DESEMPATE em `_pier_layout_avoiding_
+# joints` (regra 18.6). Conservador de proposito, abaixo dos ~15cm medidos
+# num projeto real (secao 10.6), que ainda estao rotulados como PADRAO
+# OBSERVADO AINDA NAO CONFIRMADO.
+MIN_JOINT_STAGGER_TARGET_CM = 10.0
+
+
+def _layout_min_joint_stagger_cm(layout, seg_start_cm, avoid_positions_cm):
+    """Menor distancia entre uma junta INTERNA de `layout` e a junta mais
+    proxima da fiada oposta (`avoid_positions_cm`). Quanto MAIOR, melhor o
+    travamento vertical: e' o quanto o bloco de cima "monta" sobre a junta
+    de baixo antes de terminar.
+
+    Devolve `None` quando nao ha' com o que comparar (trecho de uma peca so,
+    ou fiada oposta sem junta interna).
+
+    REGRA 18.6 (2026-08-28, pedido do usuario): "a transicao entre um bloco
+    de 34cm e um bloco de 39cm nao pode acontecer de forma aleatoria... so'
+    deve ocorrer quando existir espaco suficiente na proxima fiada para que
+    o bloco de 39cm seja encaixado corretamente e permita a continuidade do
+    prisma". Duas composicoes podem ter ZERO coincidencia de junta (as duas
+    passam na regra #1) e ainda assim uma travar muito melhor que a outra -
+    e' esse o criterio que faltava."""
+    if not avoid_positions_cm:
+        return None
+    juntas = _layout_internal_joint_positions_cm(layout, seg_start_cm)
+    if not juntas:
+        return None
+    menor = None
+    for pos in juntas:
+        for outra in avoid_positions_cm:
+            d = abs(pos - outra)
+            if menor is None or d < menor:
+                menor = d
+    return menor
 
 
 def _pier_layout_avoiding_joints(pier_cm, catalog, leading_joint_cm, trailing_joint_cm,
@@ -3100,23 +3370,45 @@ def _pier_layout_avoiding_joints(pier_cm, catalog, leading_joint_cm, trailing_jo
         return baseline
 
     def _score(layout):
-        # (coincidencia de junta [PRIMARIO, menor = melhor, regra #1
-        # absoluta], -alinhamento de vazio [desempate SECUNDARIO, maior
-        # align = melhor]) - comparado como (joint_coinc, -align), MENOR e'
-        # melhor. Ver o comentario longo no docstring sobre a inversao de
-        # prioridade (2026-08-25) e por que o align nao pode vir primeiro.
+        # (excesso de compensadores em sequencia [PRIMARIO, regra #2 - ver
+        # _layout_compensator_run_excess], coincidencia de junta
+        # [SECUNDARIO, regra #1], -alinhamento de vazio [desempate
+        # TERCIARIO, maior align = melhor]) - MENOR e' melhor. Ver o
+        # comentario longo no docstring sobre a inversao junta x align
+        # (2026-08-25) e por que o align nao pode vir primeiro; a regra #2
+        # entrou na frente das duas em 2026-08-28, porque um layout com
+        # compensadores em sequencia e' REPROVADO por
+        # validate_wall_modulation de qualquer jeito - nao e' uma solucao
+        # melhor, e' uma nao-solucao que so' parecia boa por desencontrar.
+        comp_excess = _layout_compensator_run_excess(layout, catalog)
+        # NAO aplica a isencao de peca-encostada-em-abertura aqui de
+        # proposito (ver _layout_internal_joint_positions_cm): a isencao diz
+        # que essa junta PODE coincidir, nao que ela deva ser ignorada na
+        # BUSCA. Contando todas as juntas, a busca continua preferindo uma
+        # composicao que desencontra de verdade quando ela existe; a isencao
+        # so' entra na hora de VALIDAR o resultado (alignment_conflicts /
+        # audit_wall_bond_quality), para nao reprovar o que a regra permite.
         joint_coinc = _count_joint_coincidences_cm(
             _layout_internal_joint_positions_cm(layout, seg_start_cm), avoid_positions_cm
         ) if avoid_positions_cm else 0
         align = _count_void_alignment_cm(
             _layout_void_positions_cm(layout, catalog, seg_start_cm), target_void_positions_cm
         ) if target_void_positions_cm else 0
-        return (joint_coinc, -align)
+        # REGRA 18.6: entre candidatos que ja' empataram nos criterios
+        # acima (mesma violacao da regra #2, mesma coincidencia de junta),
+        # prefere o que TRAVA melhor - a junta mais proxima da fiada oposta
+        # o mais longe possivel. Satura em MIN_JOINT_STAGGER_TARGET_CM:
+        # passar disso nao e' melhor, so' diferente, e continuar premiando
+        # empurraria o layout para extremos sem ganho construtivo.
+        stagger = _layout_min_joint_stagger_cm(layout, seg_start_cm, avoid_positions_cm)
+        trava = MIN_JOINT_STAGGER_TARGET_CM if stagger is None else min(
+            stagger, MIN_JOINT_STAGGER_TARGET_CM)
+        return (comp_excess, joint_coinc, -trava, -align)
 
     best = baseline
     best_score = _score(baseline)
     max_align = len(target_void_positions_cm) if target_void_positions_cm else 0
-    perfect_score = (0, -max_align)
+    perfect_score = (0, 0, -MIN_JOINT_STAGGER_TARGET_CM, -max_align)
     if best_score == perfect_score:
         return best
 
@@ -3369,14 +3661,35 @@ def _node_default_reservation_cm(walls_to_create, node):
 
 def _wall_end_default_start_cm(nodes, end_to_node, walls_to_create, wall_idx, end_index):
     """(reserva_cm, junta_cm) para a ponta `end_index` de `wall_idx` quando
-    esta fiada NAO tem candidato de encontro proprio ali: FREE_END (ou
-    ponta fora do grafo) -> nada para encostar (0, 0 - BLOCK_OPENING_JOINT_
-    CM); qualquer outro tipo de no' -> reserva ao menos meia espessura da
-    MAIOR parede deste no' (ver _node_default_reservation_cm) mais uma
-    junta normal depois dela."""
+    esta fiada NAO tem candidato de encontro proprio ali: FREE_END/
+    STRAIGHT_CONTINUATION (ou ponta fora do grafo) -> nada para encostar
+    (0, 0 - BLOCK_OPENING_JOINT_CM); qualquer outro tipo de no' -> reserva
+    ao menos meia espessura da MAIOR parede deste no' (ver
+    _node_default_reservation_cm) mais uma junta normal depois dela.
+
+    STRAIGHT_CONTINUATION nao reserva nada (bug real corrigido 2026-08-28,
+    medido ao vivo via MCP contra uma parede que o usuario modulou a mao
+    para servir de referencia): a reserva de `_node_default_reservation_cm`
+    existe para cobrir o CORPO de uma peca de amarracao da parede vizinha
+    que atravessa esta regiao - e numa continuacao reta essa peca NAO
+    EXISTE. `solve_all_intersections` ignora explicitamente os nos
+    FREE_END/STRAIGHT_CONTINUATION/AMBIGUOUS ("nao sao encontros de
+    amarracao especial"), entao nenhum candidato e' gerado ali; reservar
+    meia espessura + junta so' encolhia o trecho livre em ~8cm e fazia a
+    modulacao "nao fechar" por poucos centimetros. Numa parede real de
+    319cm (L_CORNER de um lado, STRAIGHT_CONTINUATION do outro) isso
+    derrubava as duas fiadas; com a reserva zerada, a Fiada A passou a
+    sair IDENTICA, peca por peca e posicao por posicao, a' que o usuario
+    montou a mao (B34 + 7xB39 + C04).
+
+    AMBIGUOUS continua reservando de proposito: neste projeto ele aparece
+    onde duas paredes ocupam o MESMO eixo em planta em faixas de altura
+    diferentes (peitoril x acima da verga), e ali existe peca de verdade -
+    zerar a reserva nesses nos dobrou as colisoes na medicao (44 mil ->
+    73 mil)."""
     node_index = end_to_node.get((wall_idx, end_index))
     node = nodes[node_index] if node_index is not None else None
-    if node is None or node["kind"] == "FREE_END":
+    if node is None or node["kind"] in ("FREE_END", "STRAIGHT_CONTINUATION"):
         return 0.0, BLOCK_OPENING_JOINT_CM
     # A reserva e' medida a partir do PONTO DO NO' (o encontro fisico), que
     # nao coincide com a ponta da parede: extend_wall_ends_to_junctions puxa
@@ -3756,6 +4069,11 @@ def solve_wall_free_fill(wall_idx, walls_to_create, nodes, end_to_node, openings
                             leading_is_open=leading_is_open, trailing_is_open=trailing_is_open,
                         )
                     if layout:
+                        # Lista de juntas a EVITAR - sem isencao, pelo mesmo
+                        # motivo do `_score` de _pier_layout_avoiding_joints:
+                        # a Fiada B deve continuar tentando desencontrar
+                        # todas, inclusive as isentas (a isencao so' vale na
+                        # hora de validar o resultado final).
                         seg_joints_cm = _layout_internal_joint_positions_cm(layout, seg_start_cm)
                         own_family_joint_positions_cm.extend(seg_joints_cm)
                         course_a_joint_positions_cm.extend(seg_joints_cm)
@@ -3779,6 +4097,8 @@ def solve_wall_free_fill(wall_idx, walls_to_create, nodes, end_to_node, openings
                         leading_is_open=leading_is_open, trailing_is_open=trailing_is_open,
                     )
                     if layout:
+                        # Sem isencao aqui tambem - esta lista alimenta a
+                        # BUSCA das variantes seguintes (ver acima).
                         own_family_joint_positions_cm.extend(
                             _layout_internal_joint_positions_cm(layout, seg_start_cm)
                         )
@@ -3808,7 +4128,10 @@ def solve_wall_free_fill(wall_idx, walls_to_create, nodes, end_to_node, openings
                     # compensadores desligados, ou um caso realmente sem
                     # solucao dentro do catalogo) - nunca aceitar isso calado.
                     residual = _count_joint_coincidences_cm(
-                        _layout_internal_joint_positions_cm(layout, seg_start_cm),
+                        _layout_internal_joint_positions_cm(
+                            layout, seg_start_cm,
+                            leading_is_open=leading_is_open, trailing_is_open=trailing_is_open,
+                        ),
                         course_a_joint_positions_cm,
                     )
                     if residual:
@@ -4207,22 +4530,6 @@ def validate_wall_modulation(wall_idx, walls_to_create, openings_per_wall, fill_
             )
     else:
         checks["sem_compensadores_consecutivos"] = True
-
-    # B34 e' reservado aos candidatos que nasceram dentro do solver de
-    # encontro. Uma ocorrencia em STANDARD_FILL e' sempre erro, mesmo que
-    # o comprimento final feche matematicamente.
-    invalid_b34 = [
-        candidate for candidate in candidates
-        if candidate.get("logical_code") == "B34"
-        and not any(token in str(candidate.get("placement_reason") or "")
-                    for token in ("CORNER", "INTERSECTION"))
-    ]
-    checks["b34_restrito_a_amarracao"] = not invalid_b34
-    if invalid_b34:
-        problems.append(
-            "{} bloco(s) B34 fora de encontro L/T (proibido no preenchimento comum)"
-            .format(len(invalid_b34))
-        )
 
     return {"wall_idx": wall_idx, "ok": not problems, "checks": checks,
             "problems": problems, "warnings": warnings}
