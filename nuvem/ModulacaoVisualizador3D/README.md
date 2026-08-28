@@ -84,11 +84,14 @@ do arquivo DXF".
   não mais uma reimplementação simplificada própria. Detecta encontros em
   L/T/X e reporta possíveis bonecas fora das espessuras escolhidas (ver
   `diagnostics` na resposta de `/api/load`).
-- `modulation_preview.py`: preview de blocos por parede ISOLADA, usando o
+- `modulation_preview.py`: preview simples para o fluxo DXF, usando o
   empacotador real (`pack_pier_with_blocks`).
-- `server.py` + `viewer/index.html`: visualizador 3D local (Three.js) —
-  carrega um DXF, mostra as paredes coloridas por status de modulação,
-  lista o detalhamento de blocos por parede.
+- `wall_capture.py`: para capturas JSON do Revit, executa o solver completo
+  de amarrações L/T/X por nível e faixa vertical, respeitando juntas,
+  aberturas, fiadas e o catálogo real exportado das famílias.
+- `server.py` + `viewer/index.html`: visualizador 3D local (Three.js) com
+  cache por arquivo, blocos vazados instanciados, renderização sob demanda,
+  elevações reais e inspetor contextual por clique.
 - `file_dialog.py` + `oda_converter.py`: botão "Selecionar DWG" ->
   caixa de seleção nativa do Windows -> conversão automática para DXF
   via ODA File Converter instalado -> carregamento automático no
@@ -107,39 +110,28 @@ do arquivo DXF".
   seleciona, scroll zoom, botão do meio pan, Shift+meio orbita); botões de
   vista padrão (Topo/Frente/Lateral/Isométrica/Zoom Extents); toggles de
   modo (Planta DXF/Walls/Blocos/Eixos/Paredes com erro) e de camada
-  (uma por layer do DXF); clique numa parede (no 3D ou na lista) mostra
+  (uma por layer do DXF); clique numa parede mostra
   layer/comprimento/espessura/junções/modulação e foca a câmera nela;
   clique numa entidade da planta baixa mostra layer/tipo/comprimento/
   origem e a parede a que ela foi associada (`wall_pairing.
   associate_entities_with_walls` — aproximação geométrica, não um
   rastreamento exato interno do motor).
 
-## Limitações conhecidas (de propósito, não escondidas)
+## Fluxos e limites
 
-- **O preview de modulação trata cada parede como isolada** — não há
-  amarração L/T/X na modulação de blocos em si. Isto **não é falta de
-  extração** (investigado a fundo, 2026-08-26): `solve_l_corner`/
-  `solve_t_intersection`/`solve_x_intersection` em `wall_modeling.py` são
-  puros, mas dependem de um `catalog` cujas células internas
-  (`cells_local`) vêm da **geometria 3D real das famílias de bloco
-  carregadas num projeto Revit** (`symbol.get_Geometry()` — vazios/
-  chanfros modelados na família). Isso não tem equivalente fora de um
-  projeto Revit real — é o mesmo tipo de limite estrutural das aberturas
-  abaixo, não um "ainda não fizemos". Uma parede "fecha" aqui pode mudar
-  de peça quando entrar em contato com uma amarração de verdade. As
-  linhas de divisão de blocos na view 3D são uma referência visual
-  aproximada (soma dos comprimentos de bloco), não um desenho de
-  execução.
-- **Aberturas (portas/janelas) não são lidas daqui** — confirmado que os
-  DWGs reais não carregam essas dimensões em atributos de bloco; no motor
-  real elas vêm de instâncias já colocadas no Revit. Decisão tomada
-  (2026-08-26): deixar de fora por enquanto, não inventar uma fonte
-  alternativa sem necessidade real comprovada.
-- **Sem edição interativa ainda** (arrastar parede/abertura e recalcular
-  ao vivo) — a Fase B completa do plano geral. A versão atual é só
-  importar e visualizar, não editar.
-- **Sem envio de volta para o Revit** — isso é a Fase C do plano geral,
-  ainda não iniciada aqui.
+- A captura JSON iniciada pelo botão do Revit é a fonte completa: traz
+  Walls, nível/offset de base, portas/janelas e o catálogo real, incluindo
+  dimensões, cor e vazios de cada família. Nesse fluxo, o visualizador usa
+  a mesma lógica de solver do projeto, preserva parede abaixo/entre/acima
+  das aberturas e permite ajuste automático ou manual de abertura somente
+  quando uma nova execução do solver comprova melhora sem novos conflitos.
+- O fluxo DXF continua sendo um preview geométrico, pois o arquivo não
+  contém de forma confiável níveis, hosts, portas/janelas nem a geometria
+  das famílias. A análise de layers é opcional e executada apenas pelo
+  botão próprio, para não bloquear a geração em desenhos grandes.
+- Os ajustes são mantidos na sessão do Modelador Externo. O envio das
+  alterações aprovadas de volta ao documento Revit ainda não faz parte
+  deste fluxo.
 
 ## Testes
 
@@ -147,19 +139,8 @@ do arquivo DXF".
 py -m unittest discover -s tests -v
 ```
 
-41 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
+52 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
 `wall_validation.py`, `modulation_preview.py` e `oda_converter.py` —
 nenhum depende de Revit, pyRevit ou de um arquivo DXF/DWG real (geram os
 próprios arquivos de teste com `ezdxf`, e o `oda_converter.py` é testado
 com o `subprocess.run` mockado, sem exigir o ODA instalado).
-
-## Próximos passos (não implementados ainda)
-
-1. Edição interativa no visualizador (mover parede/abertura, recalcular).
-2. Exportar solução aprovada em JSON e aplicar no Revit via o mecanismo de
-   escrita que já existe no motor copiado em `../core/`.
-
-Os dois itens do pedido original que ficaram de fora (amarração L/T/X real
-na modulação de blocos, e aberturas) não são "próximos passos" — são
-limites estruturais documentados acima (dependem de dados que só existem
-dentro de um projeto Revit real).

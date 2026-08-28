@@ -40,9 +40,12 @@ Rotas:
 """
 
 import json
+import hashlib
 import os
 import sys
+import time
 import traceback
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -51,8 +54,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dxf_reader import read_dxf_segments, list_layers_with_counts
 from wall_pairing import pair_walls_from_segments, associate_entities_with_walls
 from wall_capture import (
-    walls_from_capture, auto_adjust_walls, enrich_openings_for_view,
-    solve_capture_block_candidates,
+    walls_from_capture, enrich_openings_for_view,
+    solve_capture_block_candidates, adjust_capture_opening, adjust_capture_openings,
 )
 from modulation_preview import preview_walls
 from file_dialog import pick_dwg_file, pick_json_file, DialogError
@@ -61,12 +64,84 @@ from layer_matcher import analyze_layers
 from wall_validation import validate_walls
 
 VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
+_LOAD_CACHE = OrderedDict()
+_SEGMENT_CACHE = OrderedDict()
+_CAPTURE_MODELS = OrderedDict()
+_CACHE_LIMIT = 4
 
 _STATIC_CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
 }
+
+
+def _file_cache_key(path, *options):
+    stat = os.stat(path)
+    return (os.path.abspath(path), stat.st_mtime_ns, stat.st_size) + tuple(options)
+
+
+def _remember(cache, key, value):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > _CACHE_LIMIT:
+        cache.popitem(last=False)
+
+
+def _read_dxf_segments_cached(path, layers=None, unit_scale_to_cm=None):
+    layer_key = tuple(sorted(layer.lower() for layer in (layers or [])))
+    key = _file_cache_key(path, layer_key, unit_scale_to_cm)
+    cached = _SEGMENT_CACHE.get(key)
+    if cached is None:
+        cached = read_dxf_segments(path, layers=layers, unit_scale_to_cm=unit_scale_to_cm)
+        _remember(_SEGMENT_CACHE, key, cached)
+    else:
+        _SEGMENT_CACHE.move_to_end(key)
+    return [dict(segment) for segment in cached]
+
+
+def _store_capture_model(cache_key, capture):
+    model_id = hashlib.sha1(repr(cache_key).encode("utf-8")).hexdigest()[:16]
+    _remember(_CAPTURE_MODELS, model_id, capture)
+    return model_id
+
+
+def _capture_view_payload(capture, candidates=None, block_diagnostics=None):
+    segments = [dict(segment) for segment in (capture.get("segments") or [])]
+    openings = capture.get("openings") or []
+    walls, wall_diagnostics = walls_from_capture(capture)
+    if candidates is None or block_diagnostics is None:
+        candidates, block_diagnostics = solve_capture_block_candidates(capture)
+    walls_with_preview = preview_walls(walls)
+    associate_entities_with_walls(segments, walls)
+    openings_for_view = enrich_openings_for_view(walls, openings)
+    validation = validate_walls(walls, wall_diagnostics)
+    warnings = []
+    if wall_diagnostics.get("skipped_walls"):
+        warnings.append(
+            "{} Wall(s) da captura foram ignoradas por falta de eixo valido.".format(
+                wall_diagnostics["skipped_walls"]
+            )
+        )
+    if block_diagnostics.get("status") == "error":
+        warnings.append("Solver de blocos: {}".format(block_diagnostics.get("reason")))
+    return {
+        "is_capture": True,
+        "source_mode": "revit_walls",
+        "walls": walls_with_preview,
+        "entities": segments,
+        "openings": openings_for_view,
+        "block_candidates": candidates,
+        "block_diagnostics": block_diagnostics,
+        "catalog": capture.get("catalog") or {},
+        "setup": capture.get("setup") or {},
+        "level": capture.get("level", ""),
+        "source": capture.get("source", ""),
+        "wall_height_cm": (capture.get("wall_height_m") or 2.8) * 100.0,
+        "warnings": warnings,
+        "diagnostics": wall_diagnostics,
+        "validation": validation,
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -134,8 +209,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_analyze_layers()
         if parsed.path == "/api/entities":
             return self._handle_entities()
-        if parsed.path == "/api/auto-adjust":
-            return self._handle_auto_adjust()
+        if parsed.path == "/api/adjust-opening":
+            return self._handle_adjust_opening()
 
         return self._send_json(404, {"error": "rota desconhecida"})
 
@@ -151,6 +226,20 @@ class Handler(BaseHTTPRequestHandler):
 
         if not path or not os.path.isfile(path):
             return self._send_json(400, {"error": "Arquivo nao encontrado: {!r}".format(path)})
+
+        cache_key = _file_cache_key(
+            path,
+            tuple(sorted(layer.lower() for layer in (layers or []))),
+            unit_scale_to_cm,
+        )
+        cached_payload = _LOAD_CACHE.get(cache_key)
+        if cached_payload is not None:
+            _LOAD_CACHE.move_to_end(cache_key)
+            response = dict(cached_payload)
+            response["performance_ms"] = dict(response.get("performance_ms") or {})
+            response["performance_ms"].update({"total": 0.0, "cache_hit": True})
+            return self._send_json(200, response)
+        started_at = time.perf_counter()
 
         # Suporte a arquivo de captura JSON gerado pelo Revit (AbrirModeladorExterno.pushbutton)
         if path.lower().endswith(".json"):
@@ -217,7 +306,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 openings_for_view = enrich_openings_for_view(walls, openings)
 
-                return self._send_json(200, {
+                payload = {
                     "is_capture": True,
                     "source_mode": "revit_walls" if capture.get("walls") else "segments",
                     "walls": walls_with_preview,
@@ -233,13 +322,20 @@ class Handler(BaseHTTPRequestHandler):
                     "warnings": warnings,
                     "diagnostics": wall_diagnostics,
                     "validation": validation,
-                })
+                    "performance_ms": {
+                        "total": round((time.perf_counter() - started_at) * 1000.0, 1),
+                        "cache_hit": False,
+                    },
+                }
+                payload["model_id"] = _store_capture_model(cache_key, capture)
+                _remember(_LOAD_CACHE, cache_key, payload)
+                return self._send_json(200, payload)
             except Exception as exc:
                 traceback.print_exc()
                 return self._send_json(500, {"error": str(exc)})
 
         try:
-            segments = read_dxf_segments(path, layers=layers, unit_scale_to_cm=unit_scale_to_cm)
+            segments = _read_dxf_segments_cached(path, layers=layers, unit_scale_to_cm=unit_scale_to_cm)
             warnings = []
             if not segments:
                 warnings.append("Nenhum segmento de reta encontrado (confira a layer escolhida).")
@@ -259,38 +355,64 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 )
             validation = validate_walls(walls, wall_diagnostics)
-            return self._send_json(200, {
+            payload = {
                 "walls": walls_with_preview,
                 "warnings": warnings,
                 "diagnostics": wall_diagnostics,
                 "validation": validation,
-            })
+                "performance_ms": {
+                    "total": round((time.perf_counter() - started_at) * 1000.0, 1),
+                    "cache_hit": False,
+                },
+            }
+            _remember(_LOAD_CACHE, cache_key, payload)
+            return self._send_json(200, payload)
         except Exception as exc:
             traceback.print_exc()
             return self._send_json(500, {"error": str(exc)})
 
-    def _handle_auto_adjust(self):
+    def _handle_adjust_opening(self):
         try:
             body = self._read_json_body()
         except Exception:
             return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
 
-        walls = body.get("walls") or []
-        if not walls:
-            return self._send_json(400, {"error": "Nenhuma parede recebida para ajuste."})
+        model_id = str(body.get("model_id") or "")
+        capture = _CAPTURE_MODELS.get(model_id)
+        if capture is None:
+            return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
 
+        started_at = time.perf_counter()
         try:
-            adjusted_walls, adjustment = auto_adjust_walls(walls)
-            adjusted_with_preview = preview_walls(adjusted_walls)
-            validation = validate_walls(adjusted_with_preview, {
-                "possible_bonecas": [],
-                "duplicates_removed": 0,
-            })
-            return self._send_json(200, {
-                "walls": adjusted_with_preview,
-                "adjustment": adjustment,
-                "validation": validation,
-            })
+            if body.get("mode") == "auto" and not body.get("opening_id"):
+                adjusted, action, candidates, diagnostics = adjust_capture_openings(capture)
+            else:
+                adjusted, action, candidates, diagnostics = adjust_capture_opening(
+                    capture,
+                    body.get("opening_id"),
+                    delta_cm=body.get("delta_cm"),
+                    automatic=body.get("mode") == "auto",
+                )
+            payload = _capture_view_payload(adjusted, candidates, diagnostics)
+            payload["model_id"] = model_id
+            payload["adjustment"] = action
+            payload["performance_ms"] = {
+                "total": round((time.perf_counter() - started_at) * 1000.0, 1),
+                "cache_hit": False,
+            }
+            if action.get("accepted"):
+                _remember(_CAPTURE_MODELS, model_id, adjusted)
+                for cache_key, cached_payload in list(_LOAD_CACHE.items()):
+                    if cached_payload.get("model_id") == model_id:
+                        cached_adjusted = dict(payload)
+                        cached_adjusted["performance_ms"] = {
+                            "total": payload["performance_ms"]["total"],
+                            "cache_hit": False,
+                        }
+                        _remember(_LOAD_CACHE, cache_key, cached_adjusted)
+                        break
+                return self._send_json(200, payload)
+            return self._send_json(409, payload)
         except Exception as exc:
             traceback.print_exc()
             return self._send_json(500, {"error": str(exc)})
@@ -380,9 +502,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(400, {"error": str(exc)})
 
         try:
-            segments = read_dxf_segments(path, unit_scale_to_cm=unit_scale_to_cm)
+            segments = _read_dxf_segments_cached(path, unit_scale_to_cm=unit_scale_to_cm)
             if layers:
-                wall_segments = read_dxf_segments(path, layers=layers, unit_scale_to_cm=unit_scale_to_cm)
+                selected_layers = set(layer.lower() for layer in layers)
+                wall_segments = [
+                    segment for segment in segments
+                    if (segment.get("layer") or "").lower() in selected_layers
+                ]
                 walls, _diagnostics = pair_walls_from_segments(wall_segments)
                 associate_entities_with_walls(segments, walls)
             return self._send_json(200, {"entities": segments})

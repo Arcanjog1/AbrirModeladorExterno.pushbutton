@@ -1495,22 +1495,20 @@ def _project_opening_on_line(centerline, op):
 
 
 def _merge_opening_matches(matches):
-    """Ordena por t_lo e mescla intervalos horizontais sobrepostos (uniao
-    do trecho horizontal, min/max da faixa vertical) - para nao gerar
-    segmentos de parede invalidos/duplicados em build_wall_segments quando
-    duas aberturas ficam muito proximas uma da outra na mesma parede."""
-    ordered = sorted(matches, key=lambda m: m[0])
-    merged = []
-    for t_lo, t_hi, sill_z, head_z in ordered:
-        if merged and t_lo <= merged[-1][1] + MIN_SEGMENT_LENGTH_FT:
-            prev_lo, prev_hi, prev_sill, prev_head = merged[-1]
-            merged[-1] = (
-                prev_lo, max(prev_hi, t_hi),
-                min(prev_sill, sill_z), max(prev_head, head_z)
-            )
-        else:
-            merged.append((t_lo, t_hi, sill_z, head_z))
-    return merged
+    """Ordena e remove apenas duplicatas geometricamente equivalentes.
+
+    A antiga uniao por sobreposicao horizontal transformava duas aberturas
+    em alturas diferentes num unico vazio do menor peitoril ate a maior
+    verga. A decomposicao 2D de ``build_wall_segments`` lida com retangulos
+    sobrepostos sem precisar aumentar o vazio real.
+    """
+    ordered = sorted(matches, key=lambda m: (m[0], m[1], m[2], m[3]))
+    unique = []
+    for row in ordered:
+        if unique and all(abs(row[i] - unique[-1][i]) <= 1e-9 for i in range(4)):
+            continue
+        unique.append(row)
+    return unique
 
 
 def find_openings_on_line(centerline, thickness_ft, openings):
@@ -1671,29 +1669,53 @@ def build_wall_segments(centerline, base_z_abs, wall_height_ft, openings_on_line
         sub_line = Line.CreateBound(p0 + direction * t_a, p0 + direction * t_b)
         return (sub_line, seg_top_z - seg_base_z, seg_base_z - base_z_abs, "abertura")
 
-    segments = []
-    cursor_t = 0.0
+    normalized = []
+    x_breaks = [0.0, length_ft]
     for t_lo, t_hi, sill_z_abs, head_z_abs in openings_on_line:
-        # Trecho cheio (base->topo) do eixo ANTES desta abertura.
-        seg = make_horizontal_full_segment(cursor_t, t_lo)
+        lo = max(0.0, min(length_ft, t_lo))
+        hi = max(0.0, min(length_ft, t_hi))
+        sill = max(base_z_abs, min(top_z_abs, sill_z_abs))
+        head = max(base_z_abs, min(top_z_abs, head_z_abs))
+        if hi - lo <= MIN_SEGMENT_LENGTH_FT or head - sill <= MIN_SEGMENT_HEIGHT_FT:
+            continue
+        normalized.append((lo, hi, sill, head))
+        x_breaks.extend((lo, hi))
+
+    if not normalized:
+        return [(centerline, wall_height_ft, 0.0, "cad")]
+
+    x_breaks = sorted(set(round(value, 9) for value in x_breaks))
+    segments = []
+    for index in range(len(x_breaks) - 1):
+        t_a, t_b = x_breaks[index], x_breaks[index + 1]
+        if t_b - t_a <= MIN_SEGMENT_LENGTH_FT:
+            continue
+        mid_t = (t_a + t_b) / 2.0
+        voids = sorted(
+            (sill, head) for lo, hi, sill, head in normalized
+            if lo - 1e-9 <= mid_t <= hi + 1e-9
+        )
+        merged_voids = []
+        for sill, head in voids:
+            if merged_voids and sill <= merged_voids[-1][1] + 1e-9:
+                merged_voids[-1] = (merged_voids[-1][0], max(merged_voids[-1][1], head))
+            else:
+                merged_voids.append((sill, head))
+
+        if not merged_voids:
+            seg = make_horizontal_full_segment(t_a, t_b)
+            if seg:
+                segments.append(seg)
+            continue
+
+        cursor_z = base_z_abs
+        for sill, head in merged_voids:
+            seg = make_infill_segment(t_a, t_b, cursor_z, sill)
+            if seg:
+                segments.append(seg)
+            cursor_z = max(cursor_z, head)
+        seg = make_infill_segment(t_a, t_b, cursor_z, top_z_abs)
         if seg:
             segments.append(seg)
-
-        # Preenchimento abaixo do peitoril, na largura do vao.
-        seg = make_infill_segment(t_lo, t_hi, base_z_abs, min(sill_z_abs, top_z_abs))
-        if seg:
-            segments.append(seg)
-
-        # Preenchimento acima da verga, na largura do vao.
-        seg = make_infill_segment(t_lo, t_hi, max(head_z_abs, base_z_abs), top_z_abs)
-        if seg:
-            segments.append(seg)
-
-        cursor_t = t_hi
-
-    # Trecho cheio (base->topo) do eixo DEPOIS da ultima abertura.
-    seg = make_horizontal_full_segment(cursor_t, length_ft)
-    if seg:
-        segments.append(seg)
 
     return segments

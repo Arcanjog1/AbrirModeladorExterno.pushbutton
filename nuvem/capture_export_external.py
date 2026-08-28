@@ -25,14 +25,25 @@ except ImportError:  # pragma: no cover
 
 
 FALLBACK_BLOCK_COLORS_RGB = {
-    "B39": (196, 164, 132),
-    "B34": (140, 172, 196),
-    "B54": (172, 140, 196),
-    "B19": (196, 140, 164),
-    "C09": (150, 150, 150),
-    "C04": (196, 188, 120),
+    # Referencia visual fornecida a partir das familias exibidas no Revit.
+    # A cor do material real continua tendo prioridade quando esta disponivel.
+    "B39": (245, 245, 245),
+    "B34": (155, 255, 155),
+    "B54": (113, 186, 255),
+    "B19": (255, 160, 200),
+    "C09": (100, 150, 150),
+    "C04": (155, 100, 50),
 }
 DEFAULT_BLOCK_COLOR_RGB = (170, 170, 170)
+
+BLOCK_DISPLAY_NAMES = {
+    "B39": "BLOCO INTEIRO - 14x19x39",
+    "B34": "BLOCO 34 - 14x19x34",
+    "B54": "BLOCO 54 - 14x19x54",
+    "B19": "MEIO BLOCO - 14x19x19",
+    "C09": "COMPENSADOR 14x19x9",
+    "C04": "PASTILHA - 14x19X4",
+}
 
 
 def _ft_to_cm(value_ft):
@@ -62,8 +73,16 @@ def openings_to_json(all_openings):
             continue
         result.append({
             "element_id": opening.get("element_id"),
+            "host_wall_id": opening.get("host_wall_id"),
+            "type": opening.get("type") or opening.get("type_name"),
+            "family": opening.get("family_name"),
+            "level": opening.get("level"),
+            "level_elevation_cm": _ft_to_cm(opening.get("level_elevation_ft", 0.0)),
             "center_cm": [_ft_to_cm(center.X), _ft_to_cm(center.Y)],
             "width_cm": _ft_to_cm(width_ft),
+            "height_cm": _ft_to_cm(
+                opening.get("head_z_abs", 0.0) - opening.get("sill_z_abs", 0.0)
+            ),
             "sill_cm": _ft_to_cm(opening.get("sill_z_abs", 0.0)),
             "head_cm": _ft_to_cm(opening.get("head_z_abs", 0.0)),
             "center_source": opening.get("center_source"),
@@ -71,7 +90,7 @@ def openings_to_json(all_openings):
     return result
 
 
-def walls_to_json(walls, doc=None, height_param_id=None):
+def walls_to_json(walls, doc=None, height_param_id=None, base_offset_param_id=None):
     result = []
     for wall in walls or []:
         location = getattr(wall, "Location", None)
@@ -101,12 +120,30 @@ def walls_to_json(walls, doc=None, height_param_id=None):
                 height_ft = 0.0
 
         level_name = ""
+        level_elevation_ft = None
         try:
             if doc is not None:
                 level = doc.GetElement(wall.LevelId)
                 level_name = getattr(level, "Name", "") or ""
+                level_elevation_ft = getattr(level, "Elevation", None)
         except Exception:
             level_name = ""
+            level_elevation_ft = None
+
+        base_offset_ft = 0.0
+        if base_offset_param_id is not None:
+            try:
+                param = wall.get_Parameter(base_offset_param_id)
+                if param is not None:
+                    base_offset_ft = param.AsDouble()
+            except Exception:
+                base_offset_ft = 0.0
+
+        curve_base_z_ft = min(getattr(p0, "Z", 0.0), getattr(p1, "Z", 0.0))
+        if level_elevation_ft is None:
+            base_z_ft = curve_base_z_ft
+        else:
+            base_z_ft = level_elevation_ft + base_offset_ft
 
         wall_id = getattr(wall, "Id", None)
         try:
@@ -119,7 +156,10 @@ def walls_to_json(walls, doc=None, height_param_id=None):
             "id": wall_id_text or None,
             "start": [_ft_to_cm(p0.X), _ft_to_cm(p0.Y)],
             "end": [_ft_to_cm(p1.X), _ft_to_cm(p1.Y)],
-            "base_z_cm": _ft_to_cm(min(getattr(p0, "Z", 0.0), getattr(p1, "Z", 0.0))),
+            "base_z_cm": _ft_to_cm(base_z_ft),
+            "base_offset_cm": _ft_to_cm(base_offset_ft),
+            "level_elevation_cm": _ft_to_cm(level_elevation_ft or 0.0),
+            "top_z_cm": _ft_to_cm(base_z_ft + height_ft) if height_ft > 1e-9 else None,
             "thickness_cm": _ft_to_cm(getattr(wall, "Width", 0.0) or 0.0),
             "height_cm": _ft_to_cm(height_ft) if height_ft > 1e-9 else None,
             "level": level_name,
@@ -174,6 +214,7 @@ def catalog_to_json(catalog, color_lookup_fn=_symbol_representative_color_rgb):
         ]
         result[logical_code] = {
             "logical_code": logical_code,
+            "type_name": BLOCK_DISPLAY_NAMES.get(logical_code, logical_code),
             "length_cm": entry["length_cm"],
             "height_cm": entry["height_cm"],
             "width_cm": entry["width_cm"],

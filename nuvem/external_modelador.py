@@ -312,6 +312,7 @@ def main():
         selected_walls,
         doc=doc,
         height_param_id=wall_modeling.BuiltInParameter.WALL_USER_HEIGHT_PARAM,
+        base_offset_param_id=wall_modeling.BuiltInParameter.WALL_BASE_OFFSET,
     )
     openings_json = capture_export.openings_to_json(all_openings)
     catalog_json = capture_export.catalog_to_json(catalog)
@@ -406,12 +407,66 @@ def _select_walls_and_openings():
                 continue
             if used_fallback:
                 estimated += 1
+            _enrich_opening_metadata(opening, element)
             openings.append(opening)
             continue
 
         skipped += 1
 
+    _associate_openings_with_selected_walls(walls, openings)
     return walls, openings, skipped, estimated
+
+
+def _element_id_text(element):
+    element_id = getattr(element, "Id", None)
+    try:
+        return element_id.ToString()
+    except Exception:
+        return str(element_id) if element_id is not None else ""
+
+
+def _enrich_opening_metadata(opening, element):
+    symbol = getattr(element, "Symbol", None)
+    family = getattr(symbol, "Family", None) if symbol is not None else None
+    opening["type_name"] = getattr(symbol, "Name", "") or getattr(element, "Name", "") or ""
+    opening["family_name"] = getattr(family, "Name", "") or ""
+
+    level = None
+    try:
+        level_id = getattr(element, "LevelId", wall_modeling.ElementId.InvalidElementId)
+        if level_id != wall_modeling.ElementId.InvalidElementId:
+            level = doc.GetElement(level_id)
+    except Exception:
+        level = None
+    opening["level"] = getattr(level, "Name", "") or ""
+    opening["level_elevation_ft"] = getattr(level, "Elevation", 0.0) or 0.0
+
+    host = getattr(element, "Host", None)
+    if isinstance(host, wall_modeling.Wall):
+        opening["host_wall_id"] = _element_id_text(host)
+
+
+def _associate_openings_with_selected_walls(walls, openings):
+    """Completa o host usando a mesma associacao geometrica do motor real."""
+    if not walls or not openings:
+        return
+    wall_tuples = []
+    valid_walls = []
+    for wall in walls:
+        curve = getattr(getattr(wall, "Location", None), "Curve", None)
+        if curve is None:
+            continue
+        wall_tuples.append((curve, getattr(wall, "Width", 0.0), (False, False)))
+        valid_walls.append(wall)
+
+    for opening in openings:
+        if opening.get("host_wall_id"):
+            continue
+        assigned = wall_modeling.assign_openings_to_walls(wall_tuples, [opening])
+        for wall_idx, intervals in enumerate(assigned):
+            if intervals:
+                opening["host_wall_id"] = _element_id_text(valid_walls[wall_idx])
+                break
 
 
 def _build_setup_from_selected_walls(walls_json):

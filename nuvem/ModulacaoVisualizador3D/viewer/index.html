@@ -41,10 +41,19 @@
   .checkbox-row input { width: auto; margin: 0; }
   #layer-toggles { max-height: 140px; overflow-y: auto; margin-top: 4px; background: #111; border: 1px solid #333; border-radius: 4px; padding: 6px 8px; }
   #layer-toggles .hint { font-size: 12px; color: #777; }
-  #selection-panel { font-size: 12px; margin-top: 12px; padding: 8px; background: #26282c; border-radius: 4px; }
+  #selection-panel { position: absolute; top: 54px; right: 12px; z-index: 3; width: min(320px, calc(100% - 24px)); box-sizing: border-box; font-size: 12px; padding: 10px; background: rgba(32,34,38,0.96); border: 1px solid #444; border-radius: 4px; box-shadow: 0 8px 24px rgba(0,0,0,0.35); }
   #selection-panel:empty { display: none; }
   #selection-panel .sel-title { font-weight: bold; color: #8fc7ff; margin-bottom: 4px; }
   #selection-panel .sel-row { color: #ccc; }
+  @media (max-width: 700px) {
+    html, body { height: auto; min-height: 100%; overflow-x: hidden; }
+    #app { display: block; height: auto; min-height: 100%; }
+    #sidebar { width: 100%; max-height: none; border-right: 0; border-bottom: 1px solid #333; }
+    #viewport { width: 100%; height: 65vh; min-height: 420px; }
+    #view-toolbar { right: 12px; flex-wrap: wrap; }
+    #view-toolbar button { padding: 6px 8px; }
+    #nav-hint { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -75,7 +84,7 @@
     <div id="layers-list"></div>
 
     <button id="btn-load">Gerar modulação</button>
-    <button id="btn-auto-adjust" class="secondary" disabled>Ajustar paredes incompatíveis</button>
+    <button id="btn-auto-adjust" class="secondary" disabled>Ajuste automático</button>
 
     <div id="status"></div>
     <div id="validation-banner"></div>
@@ -94,11 +103,9 @@
     <label>Camadas do DXF</label>
     <div id="layer-toggles"><span class="hint">Carregue um DXF para listar as camadas.</span></div>
 
-    <div id="selection-panel"></div>
-
-    <div id="walls-list"></div>
   </div>
   <div id="viewport">
+    <div id="selection-panel"></div>
     <div id="view-toolbar">
       <button class="view-btn" id="view-top">Topo</button>
       <button class="view-btn" id="view-front">Frente</button>
@@ -168,13 +175,19 @@ const WALL_HEIGHT_CM = 280;
 let currentWalls = [];
 let currentEntities = [];
 let currentOpenings = [];
+let currentBlockCandidates = [];
+let currentCatalog = {};
+let currentModelId = null;
+let selectedOpeningId = null;
 let lastBounds = null;
 
 function clearGroup(group) {
   while (group.children.length) {
     const child = group.children.pop();
+    if (child.children && child.children.length) clearGroup(child);
     if (child.geometry) child.geometry.dispose();
-    if (child.material) child.material.dispose();
+    if (Array.isArray(child.material)) child.material.forEach(material => material.dispose());
+    else if (child.material) child.material.dispose();
   }
 }
 
@@ -204,6 +217,95 @@ function blockColor(blockLengthCm) {
   if (blockLengthCm >= 34) return 0x56a9c9;
   if (blockLengthCm >= 19) return 0x8ac15c;
   return 0xc6b85c;
+}
+
+function rgbColor(rgb, fallback = 0xaaaaaa) {
+  if (!rgb || rgb.length < 3) return fallback;
+  return ((rgb[0] & 255) << 16) | ((rgb[1] & 255) << 8) | (rgb[2] & 255);
+}
+
+function blockShellParts(candidate) {
+  const length = candidate.length_cm;
+  const width = candidate.width_cm;
+  const holes = (candidate.cells_local_cm || []).map(cell => {
+    const center = cell.center_cm || [0, 0];
+    const size = cell.size_cm || [0, 0];
+    return {
+      x0: Math.max(-length / 2, center[0] - size[0] / 2),
+      x1: Math.min(length / 2, center[0] + size[0] / 2),
+      y0: Math.max(-width / 2, center[1] - size[1] / 2),
+      y1: Math.min(width / 2, center[1] + size[1] / 2),
+    };
+  }).filter(hole => hole.x1 - hole.x0 > 0.05 && hole.y1 - hole.y0 > 0.05);
+  if (!holes.length) return [{ center_cm: [0, 0], size_cm: [length, width] }];
+
+  const uniqueSorted = values => [...new Set(values.map(value => value.toFixed(4)))]
+    .map(Number).sort((a, b) => a - b);
+  const xs = uniqueSorted([-length / 2, length / 2, ...holes.flatMap(h => [h.x0, h.x1])]);
+  const ys = uniqueSorted([-width / 2, width / 2, ...holes.flatMap(h => [h.y0, h.y1])]);
+  const parts = [];
+  for (let yi = 0; yi < ys.length - 1; yi++) {
+    const y0 = ys[yi], y1 = ys[yi + 1], cy = (y0 + y1) / 2;
+    let solidStart = null;
+    for (let xi = 0; xi < xs.length - 1; xi++) {
+      const x0 = xs[xi], x1 = xs[xi + 1], cx = (x0 + x1) / 2;
+      const isHole = holes.some(h => cx > h.x0 && cx < h.x1 && cy > h.y0 && cy < h.y1);
+      if (!isHole && solidStart === null) solidStart = x0;
+      if ((isHole || xi === xs.length - 2) && solidStart !== null) {
+        const solidEnd = isHole ? x0 : x1;
+        if (solidEnd - solidStart > 0.05) {
+          parts.push({
+            center_cm: [(solidStart + solidEnd) / 2, cy],
+            size_cm: [solidEnd - solidStart, y1 - y0],
+          });
+        }
+        solidStart = null;
+      }
+    }
+  }
+  return parts;
+}
+
+function renderSolvedBlocks(candidates) {
+  clearGroup(blocksGroup);
+  const buckets = new Map();
+  (candidates || []).forEach(candidate => {
+    blockShellParts(candidate).forEach((part, partIndex) => {
+      const size = part.size_cm;
+      const color = rgbColor(candidate.color_rgb);
+      const key = `${size[0].toFixed(3)}|${size[1].toFixed(3)}|${candidate.height_cm.toFixed(3)}|${color}`;
+      if (!buckets.has(key)) buckets.set(key, { size, color, entries: [] });
+      buckets.get(key).entries.push({ candidate, part, partIndex });
+    });
+  });
+
+  const matrix = new THREE.Matrix4();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3(1, 1, 1);
+  buckets.forEach(bucket => {
+    const geometry = new THREE.BoxGeometry(
+      Math.max(0.2, bucket.size[0]),
+      Math.max(0.2, bucket.size[1]),
+      bucket.entries[0].candidate.height_cm
+    );
+    const material = new THREE.MeshLambertMaterial({ color: bucket.color });
+    const mesh = new THREE.InstancedMesh(geometry, material, bucket.entries.length);
+    mesh.userData = { kind: 'block-instances', instances: bucket.entries };
+    bucket.entries.forEach((entry, index) => {
+      const candidate = entry.candidate;
+      const local = entry.part.center_cm || [0, 0];
+      const xDir = candidate.x_dir || [1, 0];
+      const yDir = candidate.y_dir || [0, 1];
+      const x = candidate.origin_cm[0] + xDir[0] * local[0] + yDir[0] * local[1];
+      const y = candidate.origin_cm[1] + xDir[1] * local[0] + yDir[1] * local[1];
+      const z = candidate.z_cm + candidate.height_cm / 2;
+      quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.atan2(xDir[1], xDir[0]));
+      matrix.compose(new THREE.Vector3(x, y, z), quaternion, scale);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    blocksGroup.add(mesh);
+  });
 }
 
 function addBlockPreviewBoxes(wall, length, thickness, height, baseZ, angle, centerX, centerY) {
@@ -294,7 +396,9 @@ function addWallBox(wall) {
   // divisões de blocos (aproximado: soma cumulativa dos comprimentos de
   // wall.modulation.blocks, sem contar juntas separadamente - referência
   // visual, não um desenho de execução).
-  addBlockPreviewBoxes(wall, length, thickness, height, baseZ, angle, centerX, centerY);
+  if (!currentBlockCandidates.length) {
+    addBlockPreviewBoxes(wall, length, thickness, height, baseZ, angle, centerX, centerY);
+  }
 
   if (blocks && blocks.length > 1) {
     let offset = -length / 2;
@@ -346,6 +450,7 @@ function buildLayerToggles(entities) {
     cb.addEventListener('change', () => {
       const g = planLayerGroups[cb.dataset.layer];
       if (g) g.visible = cb.checked;
+      requestRender();
     });
   });
 }
@@ -354,6 +459,7 @@ function applyWallVisibility() {
   const showOk = document.getElementById('mode-walls').checked;
   const showErr = document.getElementById('mode-errors').checked;
   wallGroup.children.forEach(c => { c.visible = c.userData.isError ? showErr : showOk; });
+  requestRender();
 }
 
 function frameCamera(walls, entities) {
@@ -424,12 +530,15 @@ function clearSelectionHighlight() {
   }
   selectedObject = null;
   selectedOriginalColor = null;
+  selectedOpeningId = null;
+  document.getElementById('btn-auto-adjust').disabled = !currentModelId;
+  requestRender();
 }
 
-function selectObject(obj) {
+function selectObject(obj, instanceId = null) {
   clearSelectionHighlight();
   selectedObject = obj;
-  if (obj.material && obj.material.color) {
+  if (obj.userData.kind !== 'block-instances' && obj.material && obj.material.color) {
     selectedOriginalColor = obj.material.color.clone();
     obj.material.color.set(0xffffff);
   }
@@ -439,10 +548,37 @@ function selectObject(obj) {
     const mod = w.modulation || {};
     panel.innerHTML = `<div class="sel-title">Parede ${w.id}</div>`
       + `<div class="sel-row">Layer: ${w.layer}</div>`
-      + `<div class="sel-row">Comprimento: ${w.length_cm.toFixed(1)}cm · Espessura: ${w.thickness_cm.toFixed(1)}cm</div>`
+      + `<div class="sel-row">Comprimento: ${w.length_cm.toFixed(1)}cm</div>`
+      + `<div class="sel-row">Altura: ${(w.height_cm || 0).toFixed(1)}cm · Largura: ${w.thickness_cm.toFixed(1)}cm</div>`
+      + `<div class="sel-row">Nível de base: ${w.level || '-'}</div>`
+      + `<div class="sel-row">Elevação: ${(w.base_z_cm || 0).toFixed(1)}cm · Offset: ${(w.base_offset_cm || 0).toFixed(1)}cm</div>`
       + `<div class="sel-row">Junções: ${(w.junctions || []).map(j => j || '-').join(' / ')}</div>`
       + `<div class="sel-row">Modulação: ${mod.closes ? 'fecha' : 'não fecha'}`
-      + `${mod.blocks ? ' (' + mod.blocks.join('+') + 'cm)' : ''}</div>`;
+      + `${mod.blocks ? ' (' + mod.blocks.join('+') + 'cm)' : ''}</div>`
+      + (!mod.closes ? `<div class="sel-row">Conflito: comprimento ou encontro exige revisão pelo solver.</div>` : '');
+  } else if (obj.userData.kind === 'opening') {
+    const op = obj.userData.opening;
+    selectedOpeningId = String(op.element_id || '');
+    document.getElementById('btn-auto-adjust').disabled = !currentModelId;
+    panel.innerHTML = `<div class="sel-title">Abertura ${op.element_id || ''}</div>`
+      + `<div class="sel-row">Tipo: ${op.type || op.family || 'não informado'}</div>`
+      + `<div class="sel-row">Largura: ${(op.width_cm || 0).toFixed(1)}cm · Altura: ${((op.height_cm || 0) || ((op.head_cm || 0) - (op.sill_cm || 0))).toFixed(1)}cm</div>`
+      + `<div class="sel-row">Base: ${(op.sill_cm || 0).toFixed(1)}cm · Verga: ${(op.head_cm || 0).toFixed(1)}cm</div>`
+      + `<div class="sel-row">Nível: ${op.level || '-'}</div>`
+      + `<div class="sel-row">Parede associada: ${op.wall_group_id || op.host_wall_id || op.wall_id || '-'}</div>`
+      + `<div class="sel-row" style="margin-top:8px">`
+      + `<button type="button" data-opening-shift="-1" class="secondary">Mover -1cm</button> `
+      + `<button type="button" data-opening-shift="1" class="secondary">Mover +1cm</button>`
+      + `</div>`;
+  } else if (obj.userData.kind === 'block-instances') {
+    const entry = obj.userData.instances[instanceId];
+    const block = entry.candidate;
+    panel.innerHTML = `<div class="sel-title">${block.type_name || ('Bloco ' + block.logical_code)}</div>`
+      + `<div class="sel-row">Código: ${block.logical_code}</div>`
+      + `<div class="sel-row">Dimensões: ${block.length_cm.toFixed(1)} × ${block.width_cm.toFixed(1)} × ${block.height_cm.toFixed(1)}cm</div>`
+      + `<div class="sel-row">Posição: ${block.origin_cm[0].toFixed(1)}, ${block.origin_cm[1].toFixed(1)}, ${block.z_cm.toFixed(1)}cm</div>`
+      + `<div class="sel-row">Nível: ${block.level || '-'} · Fiada ${block.course_index + 1} (${block.course})</div>`
+      + `<div class="sel-row">Parede: ${block.wall_id || 'encontro'} · ${block.placement_reason || 'preenchimento'}</div>`;
   } else if (obj.userData.kind === 'entity') {
     const e = obj.userData.entity;
     const dx = e.end[0] - e.start[0], dy = e.end[1] - e.start[1];
@@ -455,6 +591,7 @@ function selectObject(obj) {
       + `(${e.end[0].toFixed(1)}, ${e.end[1].toFixed(1)})</div>`
       + `<div class="sel-row">Wall associada: ${e.wall_id || 'nenhuma (fora de uma layer de parede analisada, ou parede sem par)'}</div>`;
   }
+  requestRender();
 }
 
 canvasEl.addEventListener('mousedown', (e) => { mouseDownPos = [e.clientX, e.clientY]; });
@@ -472,24 +609,44 @@ canvasEl.addEventListener('click', (e) => {
   if (wallGroup.visible) {
     wallGroup.children.forEach(c => { if (c.userData.kind === 'wall' && c.visible) pickables.push(c); });
   }
+  if (openingsGroup.visible) {
+    openingsGroup.children.forEach(c => { if (c.userData.kind === 'opening' && c.visible) pickables.push(c); });
+  }
+  if (blocksGroup.visible) {
+    blocksGroup.children.forEach(c => { if (c.userData.kind === 'block-instances' && c.visible) pickables.push(c); });
+  }
   if (planGroup.visible) {
     Object.values(planLayerGroups).forEach(g => { if (g.visible) g.children.forEach(c => pickables.push(c)); });
   }
   const hits = raycaster.intersectObjects(pickables, false);
-  if (hits.length) selectObject(hits[0].object);
+  if (hits.length) {
+    const preferred = hits.find(hit => hit.object.userData.kind === 'opening')
+      || hits.find(hit => hit.object.userData.kind === 'block-instances')
+      || hits[0];
+    selectObject(preferred.object, preferred.instanceId);
+  } else {
+    clearSelectionHighlight();
+    document.getElementById('selection-panel').innerHTML = '';
+  }
 });
 
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
+let renderPending = false;
+function requestRender() {
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(() => {
+    renderPending = false;
+    renderer.render(scene, camera);
+  });
 }
-animate();
+controls.addEventListener('change', requestRender);
+requestRender();
 
 window.addEventListener('resize', () => {
   camera.aspect = viewport.clientWidth / viewport.clientHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+  requestRender();
 });
 
 function setStatus(text, isError) {
@@ -580,8 +737,12 @@ function renderOpenings(openings) {
 function renderModulationData(data, options = {}) {
   resetWalls();
   currentWalls = data.walls || [];
-  currentOpenings = data.openings || currentOpenings || [];
+  currentOpenings = data.openings || [];
+  currentBlockCandidates = data.block_candidates || [];
+  currentCatalog = data.catalog || {};
+  currentModelId = data.model_id || null;
   currentWalls.forEach(addWallBox);
+  if (currentBlockCandidates.length) renderSolvedBlocks(currentBlockCandidates);
   renderOpenings(currentOpenings);
   applyWallVisibility();
   blocksGroup.visible = document.getElementById('mode-blocks').checked;
@@ -599,34 +760,34 @@ function renderModulationData(data, options = {}) {
   frameCamera(currentWalls, currentEntities);
 
   const closesCount = currentWalls.filter(w => w.modulation && w.modulation.closes).length;
-  let summaryText = `${currentWalls.length} parede(s) — ${closesCount} fecham em blocos, ${currentWalls.length - closesCount} precisam de ajuste.`;
+  const solver = data.block_diagnostics || {};
+  let summaryText;
+  if (data.source_mode === 'revit_walls' && solver.status === 'ok') {
+    const conflicts = (solver.collision_count || 0) + (solver.non_modular_count || 0) + (solver.jamb_exception_count || 0);
+    summaryText = `${currentWalls.length} região(ões) de parede · ${solver.candidate_count || 0} bloco(s) resolvido(s).`;
+    summaryText += conflicts ? `\n${conflicts} conflito(s) do solver exigem ajuste.` : '\nModulação validada sem conflitos pelo solver.';
+  } else {
+    summaryText = `${currentWalls.length} parede(s) — ${closesCount} fecham em blocos, ${currentWalls.length - closesCount} precisam de ajuste.`;
+  }
   if (currentOpenings.length) summaryText += `\n${currentOpenings.length} abertura(s) capturada(s).`;
   if (data.source) summaryText += `\nProjeto: ${data.source}`;
   if (data.level) summaryText += ` · Nível: ${data.level}`;
   if (data.source_mode === 'revit_walls') summaryText += `\nBase geométrica: Walls existentes do Revit.`;
   if (options.adjustment && options.adjustment.actions) {
-    const adjusted = options.adjustment.actions.filter(a => a.status === 'adjusted').length;
-    summaryText += `\nAjuste automático: ${adjusted} parede(s) corrigida(s) no preview.`;
+    const openingAdjustments = options.adjustment.actions.filter(a => a.accepted && a.opening_id).length;
+    const wallAdjustments = options.adjustment.actions.filter(a => a.status === 'adjusted').length;
+    if (openingAdjustments) summaryText += `\n${openingAdjustments} abertura(s) ajustada(s) e revalidada(s).`;
+    else if (wallAdjustments) summaryText += `\n${wallAdjustments} parede(s) corrigida(s) no preview.`;
   }
   document.getElementById('summary').textContent = summaryText;
-
-  document.getElementById('walls-list').innerHTML = currentWalls.map(w => {
-    const mod = w.modulation || {};
-    const cls = mod.closes ? 'ok' : 'bad';
-    const blocks = mod.blocks ? mod.blocks.join('+') + 'cm' : `sugestão: ${mod.suggested_length_cm}cm`;
-    const origin = w.source === 'revit_wall' ? ' · Revit Wall' : '';
-    const openings = w.openings_count ? ` · ${w.openings_count} abertura(s)` : '';
-    return `<div class="wall-row ${cls}" data-wall-id="${w.id}">${w.id}${origin} · ${w.length_cm.toFixed(1)}cm · esp ${w.thickness_cm.toFixed(1)}cm${openings}`
-      + `${w.single_line ? ' · FACE ÚNICA' : ''}<br><span class="blocks">${blocks}</span></div>`;
-  }).join('');
 
   const validation = data.validation || { issues: [] };
   document.getElementById('validation-banner').textContent = validation.issues.length
     ? validation.issues.join('\n')
     : '';
 
-  const needsAdjustment = currentWalls.some(w => !(w.modulation && w.modulation.closes));
-  document.getElementById('btn-auto-adjust').disabled = !needsAdjustment;
+  document.getElementById('btn-auto-adjust').disabled = !currentModelId;
+  requestRender();
 }
 
 async function loadModulation() {
@@ -711,7 +872,6 @@ async function pickAndConvertDwg() {
     await sleep(400);
 
     setStatus('DXF pronto para utilização');
-    await loadLayers();
     await loadModulation();
   } catch (err) {
     setStatus('Falha ao conectar ao servidor: ' + err, true);
@@ -738,39 +898,43 @@ async function pickJsonCapture() {
   }
 }
 
-async function autoAdjustWalls() {
-  if (!currentWalls.length) {
-    setStatus('Carregue a modulação antes de ajustar.', true);
+async function adjustSelectedOpening(mode, deltaCm = null) {
+  if (!currentModelId || (mode === 'manual' && !selectedOpeningId)) {
+    setStatus(mode === 'manual' ? 'Selecione uma abertura da captura do Revit.' : 'Carregue uma captura do Revit.', true);
     return;
   }
   const btn = document.getElementById('btn-auto-adjust');
   btn.disabled = true;
+  setStatus(mode === 'auto' ? 'Testando ajustes permitidos com o solver...' : 'Validando ajuste manual com o solver...');
   try {
-    setStatus('Ajustando paredes incompatíveis no preview...');
-    const res = await fetch('/api/auto-adjust', {
+    const res = await fetch('/api/adjust-opening', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ walls: currentWalls }),
+      body: JSON.stringify({
+        model_id: currentModelId,
+        opening_id: mode === 'manual' ? selectedOpeningId : null,
+        mode,
+        delta_cm: deltaCm,
+      }),
     });
     const data = await res.json();
-    if (!res.ok) { setStatus(data.error || 'Erro ao ajustar paredes.', true); return; }
-    renderModulationData({
-      walls: data.walls,
-      openings: currentOpenings,
-      validation: data.validation,
-      source_mode: 'revit_walls',
-    }, { adjustment: data.adjustment });
-    const actions = (data.adjustment && data.adjustment.actions) || [];
-    const adjusted = actions.filter(a => a.status === 'adjusted');
-    const manual = actions.filter(a => a.status === 'manual');
-    setStatus(
-      `${adjusted.length} parede(s) ajustada(s) no preview.`
-      + (manual.length ? `\n${manual.length} parede(s) ainda exigem revisão manual.` : '')
-    );
+    if (!res.ok) {
+      const reason = data.adjustment && data.adjustment.reason;
+      setStatus(reason || data.error || 'O solver rejeitou o ajuste.', true);
+      return;
+    }
+    const action = data.adjustment || {};
+    const actions = Array.isArray(action.actions) ? action.actions : [action];
+    renderModulationData(data, { adjustment: { actions } });
+    if (Array.isArray(action.actions)) {
+      const accepted = action.actions.filter(item => item.accepted);
+      const changes = accepted.map(item => `${item.opening_id}: ${item.delta_cm > 0 ? '+' : ''}${item.delta_cm}cm`).join(', ');
+      setStatus(`${accepted.length} abertura(s) ajustada(s) e validadas pelo solver.${changes ? '\n' + changes : ''}`);
+    } else {
+      setStatus(`Abertura ${action.opening_id} movida ${action.delta_cm > 0 ? '+' : ''}${action.delta_cm}cm. Modulação recalculada e validada.`);
+    }
   } catch (err) {
-    setStatus('Falha ao conectar ao servidor: ' + err, true);
-  } finally {
-    btn.disabled = !currentWalls.some(w => !(w.modulation && w.modulation.closes));
+    setStatus('Falha ao validar o ajuste: ' + err, true);
   }
 }
 
@@ -778,7 +942,11 @@ document.getElementById('btn-pick-dwg').addEventListener('click', pickAndConvert
 document.getElementById('btn-pick-json').addEventListener('click', pickJsonCapture);
 document.getElementById('btn-layers').addEventListener('click', loadLayers);
 document.getElementById('btn-load').addEventListener('click', loadModulation);
-document.getElementById('btn-auto-adjust').addEventListener('click', autoAdjustWalls);
+document.getElementById('btn-auto-adjust').addEventListener('click', () => adjustSelectedOpening('auto'));
+document.getElementById('selection-panel').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-opening-shift]');
+  if (button) adjustSelectedOpening('manual', parseFloat(button.dataset.openingShift));
+});
 
 document.getElementById('view-top').addEventListener('click', () => setView('top'));
 document.getElementById('view-front').addEventListener('click', () => setView('front'));
@@ -786,17 +954,12 @@ document.getElementById('view-side').addEventListener('click', () => setView('si
 document.getElementById('view-iso').addEventListener('click', () => setView('iso'));
 document.getElementById('view-extents').addEventListener('click', () => frameCamera(currentWalls, currentEntities));
 
-document.getElementById('mode-plan').addEventListener('change', e => { planGroup.visible = e.target.checked; });
+document.getElementById('mode-plan').addEventListener('change', e => { planGroup.visible = e.target.checked; requestRender(); });
 document.getElementById('mode-walls').addEventListener('change', applyWallVisibility);
 document.getElementById('mode-errors').addEventListener('change', applyWallVisibility);
-document.getElementById('mode-blocks').addEventListener('change', e => { blocksGroup.visible = e.target.checked; });
-document.getElementById('mode-openings').addEventListener('change', e => { openingsGroup.visible = e.target.checked; });
-document.getElementById('mode-axes').addEventListener('change', e => { axesGroup.visible = e.target.checked; });
-
-document.getElementById('walls-list').addEventListener('click', (e) => {
-  const row = e.target.closest('.wall-row');
-  if (row) focusOnWallId(row.dataset.wallId);
-});
+document.getElementById('mode-blocks').addEventListener('change', e => { blocksGroup.visible = e.target.checked; requestRender(); });
+document.getElementById('mode-openings').addEventListener('change', e => { openingsGroup.visible = e.target.checked; requestRender(); });
+document.getElementById('mode-axes').addEventListener('change', e => { axesGroup.visible = e.target.checked; requestRender(); });
 
 // Auto-carrega captura ou arquivo se passado via query param ?capture=... ou ?file=...
 window.addEventListener('DOMContentLoaded', () => {

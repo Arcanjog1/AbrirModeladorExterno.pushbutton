@@ -94,6 +94,9 @@ def _install_minimal_revit_db_shim():
                 return XYZ(0.0, 0.0, 0.0)
             return XYZ(self.X / length, self.Y / length, self.Z / length)
 
+        def Negate(self):
+            return XYZ(-self.X, -self.Y, -self.Z)
+
         def __repr__(self):
             return "XYZ({:.4f}, {:.4f}, {:.4f})".format(self.X, self.Y, self.Z)
 
