@@ -152,6 +152,18 @@ do arquivo DXF".
 - Durante o arraste de Wall ou abertura há prévia com debounce; ela calcula
   somente as faixas de nível/base afetadas e não persiste nada. Ao soltar, o
   mesmo solver recalcula e valida a edição antes de atualizar o modelo.
+- Editor interativo: toda edição possui um `revision ID`; previews que chegam
+  fora de ordem são descartados pela interface, e o servidor rejeita um
+  commit que tenha partido de uma versão antiga do modelo. A prévia é cacheada
+  por geometria/revisão e nunca altera a captura persistida.
+- Histórico atômico de sessão: **Ctrl+Z/Ctrl+Y** (ou os botões ↶/↷) restaura
+  juntos a geometria alterada e os blocos já calculados, sem executar o solver
+  novamente. Mover uma abertura e regenerar sua região é uma única operação.
+- Controles de editor: ViewCube com seis vistas ortográficas, Zoom Selected,
+  modo Realista/Blocos/Paredes/Raio-X/Wireframe/Diagnóstico, filtro por fiada
+  e plano de corte horizontal ou vertical. A visualização continua usando
+  `InstancedMesh` para blocos do mesmo tipo e só o grupo de solver afetado é
+  recalculado durante a edição.
 
 ## Testes
 
@@ -159,8 +171,9 @@ do arquivo DXF".
 py -m unittest discover -s tests -v
 ```
 
-52 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
-`wall_validation.py`, `modulation_preview.py` e `oda_converter.py` —
+69 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
+`wall_validation.py`, `modulation_preview.py`, `editor_session.py` e
+`oda_converter.py` —
 nenhum depende de Revit, pyRevit ou de um arquivo DXF/DWG real (geram os
 próprios arquivos de teste com `ezdxf`, e o `oda_converter.py` é testado
 com o `subprocess.run` mockado, sem exigir o ODA instalado).

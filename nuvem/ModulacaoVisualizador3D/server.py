@@ -75,12 +75,14 @@ from wall_validation import validate_walls
 from modulation_calculator import (
     calculate_capture_solutions, calculate_project_solutions, calculate_wall_solutions,
 )
+from editor_session import EditorSession
 
 VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 _LOAD_CACHE = OrderedDict()
 _SEGMENT_CACHE = OrderedDict()
 _CAPTURE_MODELS = OrderedDict()
 _CAPTURE_SOLUTIONS = OrderedDict()
+_EDITOR_SESSIONS = OrderedDict()
 _CACHE_LIMIT = 4
 
 _STATIC_CONTENT_TYPES = {
@@ -122,7 +124,22 @@ def _store_capture_model(cache_key, capture, candidates=None, diagnostics=None):
             "candidates": candidates,
             "diagnostics": diagnostics,
         })
+    # A sessão é deliberadamente separada dos caches legados: ela contém o
+    # histórico e a geração atual do editor, enquanto os caches continuam
+    # atendendo o carregamento de arquivos sem editar o modelo.
+    _remember(_EDITOR_SESSIONS, model_id, EditorSession(capture, candidates, diagnostics))
     return model_id
+
+
+def _session_payload_metadata(payload, session, request_revision=None):
+    """Anexa estado de concorrência/histórico sem expor snapshots internos."""
+    if session is None:
+        return payload
+    payload["revision"] = session.revision
+    if request_revision is not None:
+        payload["request_revision"] = request_revision
+    payload["history"] = session.history_summary()
+    return payload
 
 
 def _append_block_warnings(warnings, block_diagnostics):
@@ -273,6 +290,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_move_opening()
         if parsed.path == "/api/resize-opening":
             return self._handle_resize_opening()
+        if parsed.path == "/api/undo":
+            return self._handle_history_move(-1)
+        if parsed.path == "/api/redo":
+            return self._handle_history_move(1)
         if parsed.path == "/api/calculate-modulation":
             return self._handle_calculate_modulation()
 
@@ -395,6 +416,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload["model_id"] = _store_capture_model(
                     cache_key, capture, block_candidates, block_diagnostics
                 )
+                _session_payload_metadata(payload, _EDITOR_SESSIONS.get(payload["model_id"]))
                 _remember(_LOAD_CACHE, cache_key, payload)
                 return self._send_json(200, payload)
             except Exception as exc:
@@ -445,9 +467,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
 
         model_id = str(body.get("model_id") or "")
-        capture = _CAPTURE_MODELS.get(model_id)
-        if capture is None:
+        session = _EDITOR_SESSIONS.get(model_id)
+        if session is None:
             return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        base_revision, state = session.current()
+        if body.get("base_revision") is not None and int(body.get("base_revision")) != base_revision:
+            return self._send_json(409, {
+                "error": "O modelo mudou desde o início da edição.",
+                "revision": base_revision, "history": session.history_summary(),
+            })
+        capture = state["capture"]
 
         started_at = time.perf_counter()
         try:
@@ -471,11 +500,22 @@ class Handler(BaseHTTPRequestHandler):
             }
             if action.get("accepted"):
                 if preview_only:
+                    _session_payload_metadata(payload, session, body.get("revision"))
                     return self._send_json(200, payload)
-                _remember(_CAPTURE_MODELS, model_id, adjusted)
+                action["history_label"] = "Ajustar abertura" if action.get("opening_id") else "Ajustar aberturas"
+                accepted, revision, state = session.commit(
+                    base_revision, adjusted, candidates, diagnostics, action
+                )
+                if not accepted:
+                    return self._send_json(409, {
+                        "error": "O modelo mudou durante o cálculo; ajuste descartado.",
+                        "revision": revision, "history": session.history_summary(),
+                    })
+                _remember(_CAPTURE_MODELS, model_id, state["capture"])
                 _remember(_CAPTURE_SOLUTIONS, model_id, {
-                    "candidates": candidates, "diagnostics": diagnostics,
+                    "candidates": state["candidates"], "diagnostics": state["diagnostics"],
                 })
+                _session_payload_metadata(payload, session, body.get("revision"))
                 for cache_key, cached_payload in list(_LOAD_CACHE.items()):
                     if cached_payload.get("model_id") == model_id:
                         cached_adjusted = dict(payload)
@@ -525,20 +565,36 @@ class Handler(BaseHTTPRequestHandler):
             return candidates, diagnostics
         return solve_capture_block_candidates(capture)
 
-    def _preview_capture_edit(self, model_id, capture, action, started_at):
+    def _preview_capture_edit(self, model_id, capture, action, started_at,
+                              session=None, base_revision=None, request_revision=None):
         """Prévia efêmera: calcula, renderiza e nunca altera o modelo salvo."""
-        candidates, diagnostics = self._recalculate_capture_edit(model_id, capture, action)
+        cache_key = None
+        if session is not None:
+            cache_key = json.dumps({
+                "base_revision": base_revision,
+                "action": action,
+            }, sort_keys=True, ensure_ascii=False, default=str)
+            solved, cache_hit = session.preview(
+                cache_key,
+                lambda: self._recalculate_capture_edit(model_id, capture, action),
+            )
+            candidates, diagnostics = solved
+        else:
+            candidates, diagnostics = self._recalculate_capture_edit(model_id, capture, action)
+            cache_hit = False
         payload = _capture_view_payload(capture, candidates, diagnostics)
         payload["model_id"] = model_id
         payload["edit"] = action
         payload["preview"] = True
         payload["performance_ms"] = {
             "total": round((time.perf_counter() - started_at) * 1000.0, 1),
-            "cache_hit": False,
+            "cache_hit": cache_hit,
         }
+        _session_payload_metadata(payload, session, request_revision)
         return self._send_json(200, payload)
 
-    def _commit_capture_edit(self, model_id, capture, action, started_at):
+    def _commit_capture_edit(self, model_id, capture, action, started_at,
+                             session=None, base_revision=None, request_revision=None):
         """Recalcula a mesma modulação completa usada na carga inicial.
 
         O motor já separa o cálculo por nível/faixa de base. O metadado de
@@ -554,10 +610,22 @@ class Handler(BaseHTTPRequestHandler):
             "total": round((time.perf_counter() - started_at) * 1000.0, 1),
             "cache_hit": False,
         }
+        if session is not None:
+            accepted, revision, state = session.commit(
+                base_revision, capture, candidates, diagnostics, action
+            )
+            if not accepted:
+                return self._send_json(409, {
+                    "error": "A edição partiu de uma revisão antiga; o modelo foi atualizado por outra operação.",
+                    "revision": revision,
+                    "history": session.history_summary(),
+                })
+            capture = state["capture"]
+            candidates = state["candidates"]
+            diagnostics = state["diagnostics"]
         _remember(_CAPTURE_MODELS, model_id, capture)
-        _remember(_CAPTURE_SOLUTIONS, model_id, {
-            "candidates": candidates, "diagnostics": diagnostics,
-        })
+        _remember(_CAPTURE_SOLUTIONS, model_id, {"candidates": candidates, "diagnostics": diagnostics})
+        _session_payload_metadata(payload, session, request_revision)
         for cache_key, cached_payload in list(_LOAD_CACHE.items()):
             if cached_payload.get("model_id") == model_id:
                 _remember(_LOAD_CACHE, cache_key, dict(payload))
@@ -570,9 +638,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
         model_id = str(body.get("model_id") or "")
-        capture = _CAPTURE_MODELS.get(model_id)
-        if capture is None:
+        session = _EDITOR_SESSIONS.get(model_id)
+        if session is None:
             return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        base_revision, state = session.current()
+        requested_base_revision = body.get("base_revision")
+        if requested_base_revision is not None and int(requested_base_revision) != base_revision:
+            return self._send_json(409, {
+                "error": "O modelo mudou desde o início da edição.",
+                "revision": base_revision, "history": session.history_summary(),
+            })
+        capture = state["capture"]
         started_at = time.perf_counter()
         try:
             edited, action = edit_capture_wall(
@@ -580,9 +656,14 @@ class Handler(BaseHTTPRequestHandler):
             )
             if not action.get("accepted"):
                 return self._send_json(409, {"edit": action})
+            action["history_label"] = "Editar parede {}".format(action.get("wall_id") or body.get("wall_id"))
             if body.get("preview"):
-                return self._preview_capture_edit(model_id, edited, action, started_at)
-            return self._commit_capture_edit(model_id, edited, action, started_at)
+                return self._preview_capture_edit(
+                    model_id, edited, action, started_at, session, base_revision, body.get("revision")
+                )
+            return self._commit_capture_edit(
+                model_id, edited, action, started_at, session, base_revision, body.get("revision")
+            )
         except Exception as exc:
             traceback.print_exc()
             return self._send_json(500, {"error": str(exc)})
@@ -593,9 +674,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
         model_id = str(body.get("model_id") or "")
-        capture = _CAPTURE_MODELS.get(model_id)
-        if capture is None:
+        session = _EDITOR_SESSIONS.get(model_id)
+        if session is None:
             return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        base_revision, state = session.current()
+        requested_base_revision = body.get("base_revision")
+        if requested_base_revision is not None and int(requested_base_revision) != base_revision:
+            return self._send_json(409, {
+                "error": "O modelo mudou desde o início da edição.",
+                "revision": base_revision, "history": session.history_summary(),
+            })
+        capture = state["capture"]
         started_at = time.perf_counter()
         try:
             edited, action = move_capture_opening(
@@ -603,9 +692,14 @@ class Handler(BaseHTTPRequestHandler):
             )
             if not action.get("accepted"):
                 return self._send_json(409, {"edit": action})
+            action["history_label"] = "Mover abertura {}".format(action.get("opening_id") or body.get("opening_id"))
             if body.get("preview"):
-                return self._preview_capture_edit(model_id, edited, action, started_at)
-            return self._commit_capture_edit(model_id, edited, action, started_at)
+                return self._preview_capture_edit(
+                    model_id, edited, action, started_at, session, base_revision, body.get("revision")
+                )
+            return self._commit_capture_edit(
+                model_id, edited, action, started_at, session, base_revision, body.get("revision")
+            )
         except Exception as exc:
             traceback.print_exc()
             return self._send_json(500, {"error": str(exc)})
@@ -616,9 +710,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
         model_id = str(body.get("model_id") or "")
-        capture = _CAPTURE_MODELS.get(model_id)
-        if capture is None:
+        session = _EDITOR_SESSIONS.get(model_id)
+        if session is None:
             return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        base_revision, state = session.current()
+        requested_base_revision = body.get("base_revision")
+        if requested_base_revision is not None and int(requested_base_revision) != base_revision:
+            return self._send_json(409, {
+                "error": "O modelo mudou desde o início da edição.",
+                "revision": base_revision, "history": session.history_summary(),
+            })
+        capture = state["capture"]
         started_at = time.perf_counter()
         try:
             edited, action = resize_capture_opening(
@@ -626,12 +728,59 @@ class Handler(BaseHTTPRequestHandler):
             )
             if not action.get("accepted"):
                 return self._send_json(409, {"edit": action})
+            action["history_label"] = "Redimensionar abertura {}".format(action.get("opening_id") or body.get("opening_id"))
             if body.get("preview"):
-                return self._preview_capture_edit(model_id, edited, action, started_at)
-            return self._commit_capture_edit(model_id, edited, action, started_at)
+                return self._preview_capture_edit(
+                    model_id, edited, action, started_at, session, base_revision, body.get("revision")
+                )
+            return self._commit_capture_edit(
+                model_id, edited, action, started_at, session, base_revision, body.get("revision")
+            )
         except Exception as exc:
             traceback.print_exc()
             return self._send_json(500, {"error": str(exc)})
+
+    def _handle_history_move(self, direction):
+        """Restaura uma edição completa (geometria + resultado do solver)."""
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        model_id = str(body.get("model_id") or "")
+        session = _EDITOR_SESSIONS.get(model_id)
+        if session is None:
+            return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        try:
+            expected = body.get("base_revision")
+            accepted, reason, revision, state = (
+                session.undo(expected) if direction < 0 else session.redo(expected)
+            )
+        except (TypeError, ValueError):
+            return self._send_json(400, {"error": "Revisao invalida."})
+        if not accepted:
+            status = 409 if reason == "stale" else 400
+            return self._send_json(status, {
+                "error": ("O modelo mudou desde o ultimo comando." if reason == "stale"
+                          else "Nao ha nenhuma operacao para desfazer/refazer."),
+                "revision": revision,
+                "history": session.history_summary(),
+            })
+        payload = _capture_view_payload(state["capture"], state["candidates"], state["diagnostics"])
+        payload.update({
+            "model_id": model_id,
+            "edit": {"history_label": "Desfazer" if direction < 0 else "Refazer"},
+            "performance_ms": {"total": 0.0, "cache_hit": True},
+        })
+        _remember(_CAPTURE_MODELS, model_id, state["capture"])
+        _remember(_CAPTURE_SOLUTIONS, model_id, {
+            "candidates": state["candidates"], "diagnostics": state["diagnostics"],
+        })
+        _session_payload_metadata(payload, session, body.get("revision"))
+        for cache_key, cached_payload in list(_LOAD_CACHE.items()):
+            if cached_payload.get("model_id") == model_id:
+                _remember(_LOAD_CACHE, cache_key, dict(payload))
+                break
+        return self._send_json(200, payload)
 
     def _handle_calculate_modulation(self):
         try:

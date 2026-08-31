@@ -54,6 +54,15 @@
   #opening-context-menu button { display: block; width: 100%; margin: 0; padding: 7px 9px; text-align: left; background: transparent; color: #eee; border: 0; border-radius: 3px; }
   #opening-context-menu button:hover { background: #353941; }
   #opening-context-menu .menu-separator { height: 1px; background: #444; margin: 5px 2px; }
+  #editor-toolbar { position: absolute; top: 12px; right: 12px; z-index: 4; display: flex; gap: 5px; }
+  #editor-toolbar button { margin: 0; padding: 6px 9px; font-size: 12px; background: #333; }
+  #editor-toolbar button:disabled { opacity: 0.45; cursor: default; }
+  #view-cube { position: absolute; right: 16px; bottom: 48px; z-index: 4; width: 88px; height: 88px; }
+  #view-cube button { position: absolute; margin: 0; padding: 3px; min-width: 28px; font-size: 10px; background: #3c4858; border: 1px solid #8191a5; }
+  #cube-top { left: 29px; top: 0; } #cube-bottom { left: 29px; bottom: 0; }
+  #cube-front { left: 29px; top: 30px; } #cube-back { left: 29px; bottom: 30px; }
+  #cube-left { left: 0; top: 30px; } #cube-right { right: 0; top: 30px; }
+  #history-list { font-size: 12px; margin-top: 6px; color: #aaa; max-height: 110px; overflow-y: auto; }
   @media (max-width: 700px) {
     html, body { height: auto; min-height: 100%; overflow-x: hidden; }
     #app { display: block; height: auto; min-height: 100%; }
@@ -135,6 +144,14 @@
     <div id="calculator-results"></div>
 
     <label>Modos de visualização</label>
+    <select id="display-mode">
+      <option value="realistic">Realista</option>
+      <option value="blocks">Blocos</option>
+      <option value="walls">Paredes</option>
+      <option value="xray">Raio-X</option>
+      <option value="wireframe">Wireframe</option>
+      <option value="diagnostic">Diagnóstico</option>
+    </select>
     <div id="view-modes">
       <label class="checkbox-row"><input type="checkbox" id="mode-plan" checked> Planta CAD / Referência</label>
       <label class="checkbox-row"><input type="checkbox" id="mode-walls" checked> Walls</label>
@@ -146,6 +163,20 @@
 
     <label>Camadas do DXF</label>
     <div id="layer-toggles"><span class="hint">Carregue um DXF para listar as camadas.</span></div>
+
+    <label>Fiadas e plano de corte</label>
+    <select id="course-filter"><option value="">Todas as fiadas</option></select>
+    <select id="section-axis">
+      <option value="">Sem corte</option>
+      <option value="z">Horizontal (Z)</option>
+      <option value="x">Vertical (X)</option>
+      <option value="y">Vertical (Y)</option>
+    </select>
+    <input type="number" id="section-position" step="1" placeholder="Posição do corte (cm)">
+    <button id="btn-apply-section" class="secondary">Aplicar plano de corte</button>
+
+    <label>Histórico</label>
+    <div id="history-list">Nenhuma edição nesta sessão.</div>
 
   </div>
   <div id="viewport">
@@ -166,6 +197,16 @@
       <button class="view-btn" id="view-side">Lateral</button>
       <button class="view-btn" id="view-iso">Isométrica</button>
       <button class="view-btn" id="view-extents">Zoom Extents</button>
+    </div>
+    <div id="editor-toolbar">
+      <button id="btn-undo" title="Desfazer (Ctrl+Z)" disabled>↶</button>
+      <button id="btn-redo" title="Refazer (Ctrl+Y)" disabled>↷</button>
+      <button id="view-selected" title="Zoom Selected">Focar seleção</button>
+    </div>
+    <div id="view-cube" aria-label="ViewCube">
+      <button id="cube-top" data-view="top">TOP</button><button id="cube-bottom" data-view="bottom">BOT</button>
+      <button id="cube-front" data-view="front">FR</button><button id="cube-back" data-view="back">BK</button>
+      <button id="cube-left" data-view="left">L</button><button id="cube-right" data-view="right">R</button>
     </div>
     <div id="legend">
       <div><span style="background:#4caf50"></span>fecha em blocos</div>
@@ -239,6 +280,10 @@ let activePreviewAction = null;
 let lastBounds = null;
 let editSession = null;
 let editPreviewTimer = null;
+let modelRevision = 0;
+let requestRevision = 0;
+let activeCourseIndex = null;
+let sectionPlane = null;
 
 function clearGroup(group) {
   while (group.children.length) {
@@ -328,7 +373,9 @@ function blockShellParts(candidate) {
 function renderSolvedBlocks(candidates) {
   clearGroup(blocksGroup);
   const buckets = new Map();
-  (candidates || []).forEach(candidate => {
+  (candidates || []).filter(candidate => (
+    activeCourseIndex === null || Number(candidate.course_index) === activeCourseIndex
+  )).forEach(candidate => {
     blockShellParts(candidate).forEach((part, partIndex) => {
       const size = part.size_cm;
       const color = rgbColor(candidate.color_rgb);
@@ -573,14 +620,93 @@ function setView(kind) {
     camera.position.set(b.cx, b.cy + span * 0.001, b.cz + span * 1.6);
   } else if (kind === 'front') {
     camera.position.set(b.cx, b.cy - span * 1.6, b.cz);
+  } else if (kind === 'back') {
+    camera.position.set(b.cx, b.cy + span * 1.6, b.cz);
   } else if (kind === 'side') {
     camera.position.set(b.cx - span * 1.6, b.cy, b.cz);
+  } else if (kind === 'left') {
+    camera.position.set(b.cx - span * 1.6, b.cy, b.cz);
+  } else if (kind === 'right') {
+    camera.position.set(b.cx + span * 1.6, b.cy, b.cz);
+  } else if (kind === 'bottom') {
+    camera.position.set(b.cx, b.cy + span * 0.001, b.cz - span * 1.6);
   } else if (kind === 'iso') {
     camera.position.set(b.cx - span * 1.1, b.cy - span * 1.1, b.cz + span * 1.1);
   }
   camera.up.set(0, 0, 1);
   camera.lookAt(controls.target);
   controls.update();
+}
+
+function focusSelected() {
+  if (selectedObject && selectedObject.userData.kind === 'wall') {
+    return focusOnWallId(selectedObject.userData.wall.id);
+  }
+  if (selectedObject && selectedObject.position) {
+    controls.target.copy(selectedObject.position);
+    const span = (lastBounds || { span: 300 }).span;
+    camera.position.set(selectedObject.position.x, selectedObject.position.y - span * 0.7, selectedObject.position.z + span * 0.55);
+    controls.update();
+    return;
+  }
+  setView('iso');
+}
+
+function applyDisplayMode() {
+  const mode = document.getElementById('display-mode').value;
+  const xray = mode === 'xray';
+  const wireframe = mode === 'wireframe';
+  const diagnostic = mode === 'diagnostic';
+  wallGroup.visible = mode !== 'blocks';
+  blocksGroup.visible = mode !== 'walls' && document.getElementById('mode-blocks').checked;
+  openingsGroup.visible = document.getElementById('mode-openings').checked;
+  wallGroup.traverse(item => {
+    if (!item.material) return;
+    const materials = Array.isArray(item.material) ? item.material : [item.material];
+    materials.forEach(material => {
+      material.wireframe = wireframe;
+      material.transparent = xray || material.transparent;
+      if (xray) material.opacity = Math.min(material.opacity, 0.16);
+      if (diagnostic && item.userData.kind === 'wall' && item.userData.isError) material.color.set(0xe53935);
+    });
+  });
+  requestRender();
+}
+
+function applySectionPlane() {
+  const axis = document.getElementById('section-axis').value;
+  const raw = Number(document.getElementById('section-position').value);
+  sectionPlane = axis && Number.isFinite(raw)
+    ? new THREE.Plane(axis === 'x' ? new THREE.Vector3(-1, 0, 0) : axis === 'y' ? new THREE.Vector3(0, -1, 0) : new THREE.Vector3(0, 0, -1), raw)
+    : null;
+  renderer.localClippingEnabled = Boolean(sectionPlane);
+  scene.traverse(item => {
+    if (!item.material) return;
+    (Array.isArray(item.material) ? item.material : [item.material]).forEach(material => {
+      material.clippingPlanes = sectionPlane ? [sectionPlane] : null;
+      material.needsUpdate = true;
+    });
+  });
+  requestRender();
+}
+
+function updateCourseFilter() {
+  const select = document.getElementById('course-filter');
+  const courses = [...new Set(currentBlockCandidates.map(item => Number(item.course_index)).filter(Number.isFinite))].sort((a, b) => a - b);
+  const oldValue = select.value;
+  select.innerHTML = '<option value="">Todas as fiadas</option>' + courses.map(course => `<option value="${course}">Fiada ${course + 1}</option>`).join('');
+  if ([...select.options].some(option => option.value === oldValue)) select.value = oldValue;
+  activeCourseIndex = select.value === '' ? null : Number(select.value);
+}
+
+function updateHistory(history) {
+  const state = history || {};
+  document.getElementById('btn-undo').disabled = !state.can_undo;
+  document.getElementById('btn-redo').disabled = !state.can_redo;
+  const entries = state.entries || [];
+  document.getElementById('history-list').textContent = entries.length
+    ? entries.slice().reverse().map(item => '✓ ' + (item && item.history_label || 'Edição')).join('\n')
+    : 'Nenhuma edição nesta sessão.';
 }
 
 function focusOnWallId(wallId) {
@@ -724,14 +850,14 @@ function worldPointAt(clientX, clientY) {
 function beginWallEdit(mode) {
   const wall = currentWalls.find(item => String(item.id || '') === selectedWallId);
   if (!wall || !currentModelId) return;
-  editSession = { kind: 'wall', mode, wall, pointerStart: null };
+  editSession = { kind: 'wall', mode, wall, pointerStart: null, baseRevision: modelRevision };
   setStatus(`Arraste no modelo para ${mode === 'move' ? 'mover a parede' : (mode === 'start' ? 'reposicionar o início' : 'reposicionar o fim')}. A prévia usa o solver e a validação final ocorre ao soltar.`);
 }
 
 function beginOpeningEdit() {
   const opening = currentOpenings.find(item => String(item.element_id || '') === selectedOpeningId);
   if (!opening || !currentModelId) return;
-  editSession = { kind: 'opening', opening, pointerStart: null };
+  editSession = { kind: 'opening', opening, pointerStart: null, baseRevision: modelRevision };
   setStatus('Arraste no modelo para mover a abertura ao longo da parede. A prévia usa o solver e a validação final ocorre ao soltar.');
 }
 
@@ -746,7 +872,8 @@ async function resizeSelectedOpening() {
   try {
     const response = await fetch('/api/resize-opening', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model_id: currentModelId, opening_id: opening.element_id, width_cm: width }),
+      body: JSON.stringify({ model_id: currentModelId, opening_id: opening.element_id, width_cm: width,
+        base_revision: modelRevision, revision: ++requestRevision }),
     });
     const data = await response.json();
     if (!response.ok) {
@@ -772,7 +899,8 @@ async function commitInteractiveEdit(session, point) {
     const start = session.mode === 'move' ? [x0 + dx, y0 + dy] : (session.mode === 'start' ? [point.x, point.y] : [x0, y0]);
     const end = session.mode === 'move' ? [x1 + dx, y1 + dy] : (session.mode === 'end' ? [point.x, point.y] : [x1, y1]);
     endpoint = '/api/edit-wall';
-    body = { model_id: currentModelId, wall_id: session.wall.id, start_cm: start, end_cm: end };
+    body = { model_id: currentModelId, wall_id: session.wall.id, start_cm: start, end_cm: end,
+      base_revision: session.baseRevision, revision: ++requestRevision };
   } else {
     const opening = session.opening;
     const axis = opening.axis_cm || [Math.cos(opening.angle_rad || 0), Math.sin(opening.angle_rad || 0)];
@@ -782,6 +910,7 @@ async function commitInteractiveEdit(session, point) {
       model_id: currentModelId,
       opening_id: opening.element_id,
       center_cm: [opening.center_cm[0] + axis[0] * delta, opening.center_cm[1] + axis[1] * delta],
+      base_revision: session.baseRevision, revision: ++requestRevision,
     };
   }
   setStatus('Recalculando paredes, encontros e blocos afetados...');
@@ -807,6 +936,7 @@ function scheduleInteractivePreview(session, point) {
   if (editPreviewTimer) window.clearTimeout(editPreviewTimer);
   editPreviewTimer = window.setTimeout(async () => {
     if (editSession !== session || !currentModelId || !point) return;
+    const previewRevision = ++requestRevision;
     let endpoint;
     let body;
     if (session.kind === 'wall') {
@@ -817,7 +947,8 @@ function scheduleInteractivePreview(session, point) {
       const start = session.mode === 'move' ? [x0 + dx, y0 + dy] : (session.mode === 'start' ? [point.x, point.y] : [x0, y0]);
       const end = session.mode === 'move' ? [x1 + dx, y1 + dy] : (session.mode === 'end' ? [point.x, point.y] : [x1, y1]);
       endpoint = '/api/edit-wall';
-      body = { model_id: currentModelId, wall_id: session.wall.id, start_cm: start, end_cm: end, preview: true };
+      body = { model_id: currentModelId, wall_id: session.wall.id, start_cm: start, end_cm: end,
+        preview: true, base_revision: session.baseRevision, revision: previewRevision };
     } else {
       const opening = session.opening;
       const axis = opening.axis_cm || [Math.cos(opening.angle_rad || 0), Math.sin(opening.angle_rad || 0)];
@@ -825,7 +956,8 @@ function scheduleInteractivePreview(session, point) {
       endpoint = '/api/move-opening';
       body = {
         model_id: currentModelId, opening_id: opening.element_id,
-        center_cm: [opening.center_cm[0] + axis[0] * delta, opening.center_cm[1] + axis[1] * delta], preview: true,
+        center_cm: [opening.center_cm[0] + axis[0] * delta, opening.center_cm[1] + axis[1] * delta],
+        preview: true, base_revision: session.baseRevision, revision: previewRevision,
       };
     }
     try {
@@ -833,7 +965,7 @@ function scheduleInteractivePreview(session, point) {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
       const data = await response.json();
-      if (editSession !== session) return;
+      if (editSession !== session || Number(data.request_revision) !== previewRevision) return;
       if (!response.ok) {
         setStatus((data.edit && data.edit.reason) || data.error || 'A prévia não encontrou uma geometria válida.', true);
         return;
@@ -1133,11 +1265,13 @@ function renderModulationData(data, options = {}) {
   currentBlockCandidates = data.block_candidates || [];
   currentCatalog = data.catalog || {};
   currentModelId = data.model_id || null;
+  if (!options.preview && Number.isFinite(Number(data.revision))) modelRevision = Number(data.revision);
   if (!options.preview) {
     committedViewData = data;
     activePreviewAction = null;
   }
   currentWalls.forEach(addWallBox);
+  updateCourseFilter();
   if (currentBlockCandidates.length) renderSolvedBlocks(currentBlockCandidates);
   renderOpenings(currentOpenings);
   applyWallVisibility();
@@ -1190,6 +1324,9 @@ function renderModulationData(data, options = {}) {
     : '';
 
   document.getElementById('btn-auto-adjust').disabled = !currentModelId;
+  updateHistory(data.history);
+  applyDisplayMode();
+  applySectionPlane();
   requestRender();
 }
 
@@ -1319,6 +1456,8 @@ async function adjustSelectedOpening(mode, deltaCm = null, preview = false) {
         mode,
         delta_cm: deltaCm,
         preview,
+        base_revision: modelRevision,
+        revision: ++requestRevision,
       }),
     });
     const data = await res.json();
@@ -1363,6 +1502,28 @@ async function applyOpeningPreview() {
   await adjustSelectedOpening(activePreviewAction.mode, activePreviewAction.deltaCm, false);
 }
 
+async function moveHistory(direction) {
+  if (!currentModelId) return;
+  setStatus(direction < 0 ? 'Desfazendo edição…' : 'Refazendo edição…');
+  try {
+    const response = await fetch(direction < 0 ? '/api/undo' : '/api/redo', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_id: currentModelId, base_revision: modelRevision, revision: ++requestRevision }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setStatus(data.error || 'Não foi possível alterar o histórico.', true);
+      if (Number.isFinite(Number(data.revision))) modelRevision = Number(data.revision);
+      updateHistory(data.history);
+      return;
+    }
+    renderModulationData(data, { edit: data.edit });
+    setStatus(direction < 0 ? 'Edição desfeita.' : 'Edição refeita.');
+  } catch (error) {
+    setStatus('Falha ao alterar o histórico: ' + error, true);
+  }
+}
+
 document.getElementById('btn-pick-dwg').addEventListener('click', pickAndConvertDwg);
 document.getElementById('btn-pick-json').addEventListener('click', pickJsonCapture);
 document.getElementById('btn-layers').addEventListener('click', loadLayers);
@@ -1371,6 +1532,21 @@ document.getElementById('btn-auto-adjust').addEventListener('click', () => adjus
 document.getElementById('btn-calculate').addEventListener('click', calculateSingleWall);
 document.getElementById('btn-calculate-model').addEventListener('click', calculateCurrentModel);
 document.getElementById('btn-calculate-project').addEventListener('click', calculateWallList);
+document.getElementById('btn-undo').addEventListener('click', () => moveHistory(-1));
+document.getElementById('btn-redo').addEventListener('click', () => moveHistory(1));
+document.getElementById('view-selected').addEventListener('click', focusSelected);
+document.querySelectorAll('#view-cube [data-view]').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
+document.getElementById('display-mode').addEventListener('change', () => {
+  if (committedViewData) renderModulationData(committedViewData);
+  else applyDisplayMode();
+});
+document.getElementById('course-filter').addEventListener('change', event => {
+  activeCourseIndex = event.target.value === '' ? null : Number(event.target.value);
+  if (currentBlockCandidates.length) renderSolvedBlocks(currentBlockCandidates);
+  applyDisplayMode();
+  applySectionPlane();
+});
+document.getElementById('btn-apply-section').addEventListener('click', applySectionPlane);
 document.getElementById('selection-panel').addEventListener('click', (event) => {
   const wallButton = event.target.closest('[data-wall-edit]');
   if (wallButton) {
@@ -1421,6 +1597,17 @@ document.getElementById('mode-errors').addEventListener('change', applyWallVisib
 document.getElementById('mode-blocks').addEventListener('change', e => { blocksGroup.visible = e.target.checked; requestRender(); });
 document.getElementById('mode-openings').addEventListener('change', e => { openingsGroup.visible = e.target.checked; requestRender(); });
 document.getElementById('mode-axes').addEventListener('change', e => { axesGroup.visible = e.target.checked; requestRender(); });
+
+window.addEventListener('keydown', event => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+  if (event.key.toLowerCase() === 'z') {
+    event.preventDefault();
+    moveHistory(event.shiftKey ? 1 : -1);
+  } else if (event.key.toLowerCase() === 'y') {
+    event.preventDefault();
+    moveHistory(1);
+  }
+});
 
 // Auto-carrega captura ou arquivo se passado via query param ?capture=... ou ?file=...
 window.addEventListener('DOMContentLoaded', () => {
