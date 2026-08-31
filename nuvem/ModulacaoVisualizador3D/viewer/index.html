@@ -79,7 +79,11 @@
 <div id="app">
   <div id="sidebar">
     <h1>Modulação externa — visualizador local</h1>
-    <button id="close-project-panel" title="Fechar painel">×</button>
+    <div class="panel-window-controls project-panel-controls">
+      <button type="button" data-panel-minimize="sidebar" title="Minimizar painel">—</button>
+      <button type="button" data-panel-dock="sidebar" title="Alternar encaixe">⇥</button>
+      <button type="button" id="close-project-panel" title="Fechar painel">×</button>
+    </div>
 
     <button id="btn-pick-dwg">Selecionar DWG</button>
     <button id="btn-pick-json" style="background:#00897b; margin-top:6px;">Selecionar Captura do Revit (JSON)</button>
@@ -195,10 +199,6 @@
         <button data-editor-tool="rotate" title="Rotacionar parede por valor">Girar</button>
         <button data-editor-tool="measure" title="Medir entre dois pontos">Medir</button>
         <button data-editor-tool="section" title="Configurar plano de corte">Corte</button>
-        <select id="snap-step" title="Precisão do snap">
-          <option value="0.1">Snap 1 mm</option><option value="0.5">Snap 5 mm</option>
-          <option value="1" selected>Snap 1 cm</option><option value="5">Snap 5 cm</option><option value="0">Snap desligado</option>
-        </select>
       </div>
       <div class="toolbar-separator"></div>
       <div class="toolbar-group">
@@ -206,7 +206,7 @@
         <button id="btn-isolate-selected" title="Isolar elemento ou parede">Isolar</button>
         <button id="btn-hide-selected" title="Ocultar elemento selecionado">Ocultar</button>
         <button id="btn-show-all" title="Restaurar toda a visibilidade">Mostrar tudo</button>
-        <button id="btn-realtime" class="active" title="Prévia de modulação durante o arraste">Tempo real</button>
+        <button id="btn-diagnostic-mode" title="Alternar diagnóstico visual">Diagnóstico</button>
       </div>
       <div class="toolbar-separator"></div>
     <div id="view-toolbar">
@@ -220,10 +220,34 @@
       <button id="btn-undo" title="Desfazer (Ctrl+Z)" disabled>↶</button>
       <button id="btn-redo" title="Refazer (Ctrl+Y)" disabled>↷</button>
       <button id="view-selected" title="Zoom Selected">Focar seleção</button>
+      <button id="view-reset" title="Restaurar vista isométrica">Reset</button>
+      <button id="btn-cancel-action" title="Cancelar operação atual (Esc)" disabled>Cancelar</button>
     </div>
+      <div id="project-identity"><span id="project-name">Sem projeto</span><button id="btn-search" title="Pesquisar elementos (Ctrl+F)">Pesquisar</button><button id="btn-command-palette" title="Paleta de comandos (Ctrl+K)">Comandos</button><button id="btn-theme" title="Alternar tema claro/escuro">Tema</button></div>
+    </div>
+    <div id="navigation-toolbar" aria-label="Navegação 3D">
+      <button data-nav-tool="select" title="Selecionar">Selecionar</button>
+      <button data-nav-tool="orbit" title="Orbitar">Orbitar</button>
+      <button data-nav-tool="pan" title="Pan">Pan</button>
+      <button data-nav-tool="zoom" title="Zoom">Zoom</button>
+      <span></span>
+      <button data-nav-action="extents" title="Enquadrar modelo">Enquadrar modelo</button>
+      <button data-nav-action="selection" title="Enquadrar seleção">Enquadrar seleção</button>
+      <button data-nav-action="home" title="Vista inicial">Vista inicial</button>
     </div>
     <div id="selection-panel"></div>
     <div id="opening-context-menu">
+      <button type="button" data-opening-action="move">Mover/arrastar</button>
+      <button type="button" data-opening-action="properties">Editar dimensões e tipo</button>
+      <button type="button" data-opening-action="shift--1">Mover -1cm</button>
+      <button type="button" data-opening-action="shift-1">Mover +1cm</button>
+      <button type="button" data-opening-action="center-wall">Centralizar na parede</button>
+      <button type="button" data-opening-action="duplicate">Duplicar</button>
+      <button type="button" data-opening-action="delete">Excluir</button>
+      <button type="button" data-opening-action="host-wall">Mostrar parede hospedeira</button>
+      <button type="button" data-opening-action="isolate">Isolar</button>
+      <button type="button" data-opening-action="diagnostic">Diagnóstico</button>
+      <div class="menu-separator"></div>
       <button type="button" data-opening-preview="auto">Ajustar automaticamente para modulação</button>
       <button type="button" data-opening-preview="-5">Visualizar mover -5cm</button>
       <button type="button" data-opening-preview="-1">Visualizar mover -1cm</button>
@@ -234,27 +258,50 @@
       <button type="button" data-opening-cancel-preview>Cancelar preview</button>
     </div>
     <div id="wall-inspector">
-      <div class="panel-titlebar"><strong id="wall-inspector-title">Inspeção de parede</strong><button id="close-wall-inspector">×</button></div>
+      <div class="panel-titlebar"><strong id="wall-inspector-title">Inspeção de parede</strong><span class="panel-window-controls"><button type="button" data-panel-minimize="wall-inspector" title="Minimizar">—</button><button type="button" data-panel-dock="wall-inspector" title="Alternar encaixe">⇥</button><button id="close-wall-inspector">×</button></span></div>
       <div class="wall-inspector-actions">
         <button id="wall-previous">← Parede anterior</button><button id="wall-next">Próxima parede →</button>
-        <button id="wall-isolate">Isolar atual</button><button id="wall-connected">Conectadas</button>
-        <button id="wall-only-blocks">Só blocos</button><button id="wall-only-openings">Só aberturas</button>
-        <button id="wall-elevation">Elevação</button><button id="wall-3d">3D</button><button id="wall-restore">Visão geral</button>
+        <button id="wall-elevation">Elevação</button><button id="wall-front">Frontal</button><button id="wall-side">Lateral</button>
+        <button id="wall-course">Vista da fiada</button><button id="wall-diagnostic">Diagnóstico</button>
+        <button id="wall-3d">3D</button><button id="wall-details">Mais</button><button id="wall-restore">Sair</button>
       </div>
+      <div id="wall-inspector-secondary"><button id="wall-isolate">Isolar atual</button><button id="wall-connected">Conectadas</button><button id="wall-only-blocks">Só blocos</button><button id="wall-only-openings">Só aberturas</button><button id="btn-course-labels">Nº fiadas</button></div>
       <div id="wall-inspector-summary"></div>
     </div>
     <div id="element-context-menu">
       <button data-context-action="move">Mover</button>
       <button data-context-action="properties">Propriedades</button>
+      <button data-context-action="center">Centralizar seleção</button>
       <button data-context-action="isolate">Isolar</button>
+      <button data-context-action="host-wall">Mostrar parede hospedeira</button>
       <button data-context-action="wall-view">Vista da parede</button>
+      <button data-context-action="previous-wall">Parede anterior</button>
+      <button data-context-action="next-wall">Próxima parede</button>
+      <button data-context-action="recalculate">Modular novamente</button>
+      <button data-context-action="courses">Mostrar fiadas</button>
+      <button data-context-action="dependencies">Mostrar dependências</button>
+      <button data-context-action="highlight-type">Destacar tipo de bloco</button>
       <button data-context-action="diagnostic">Diagnóstico</button>
       <button data-context-action="hide">Ocultar</button>
+    </div>
+    <div id="section-panel" class="editor-floating-panel">
+      <div class="panel-titlebar"><strong>Plano de corte</strong><span class="panel-window-controls"><button type="button" data-panel-minimize="section-panel">—</button><button type="button" data-panel-dock="section-panel">⇥</button><button type="button" data-panel-close="section-panel">×</button></span></div>
+      <label class="checkbox-row"><input type="checkbox" id="section-live-enabled"> Corte ativo em tempo real</label>
+      <select id="section-live-axis"><option value="z">Horizontal (Z)</option><option value="x">Vertical (X)</option><option value="y">Vertical (Y)</option><option value="wall">Ao longo da parede atual</option></select>
+      <input type="range" id="section-live-slider" min="-1000" max="1000" step="1" value="150">
+      <label>Posição (m)<input type="number" id="section-live-position" step="0.01" value="1.50"></label>
+      <div class="property-actions"><button type="button" id="section-through-selection">Pela seleção</button><button type="button" id="section-disable" class="secondary">Desativar</button></div>
+    </div>
+    <div id="diagnostics-panel" class="editor-floating-panel">
+      <div class="panel-titlebar"><strong>Diagnóstico técnico</strong><span class="panel-window-controls"><button type="button" data-panel-minimize="diagnostics-panel">—</button><button type="button" data-panel-dock="diagnostics-panel">⇥</button><button type="button" data-panel-close="diagnostics-panel">×</button></span></div>
+      <div id="diagnostics-content">Selecione uma parede, abertura ou bloco para inspecionar.</div>
     </div>
     <div id="view-cube" aria-label="ViewCube">
       <button id="cube-top" data-view="top">TOP</button><button id="cube-bottom" data-view="bottom">BOT</button>
       <button id="cube-front" data-view="front">FR</button><button id="cube-back" data-view="back">BK</button>
       <button id="cube-left" data-view="left">L</button><button id="cube-right" data-view="right">R</button>
+      <button id="cube-iso" data-view="iso" title="Vista isométrica">ISO</button>
+      <button id="cube-home" title="Vista inicial">⌂</button>
     </div>
     <div id="legend">
       <div><span style="background:#4caf50"></span>fecha em blocos</div>
@@ -262,14 +309,24 @@
       <div><span style="background:#5588cc"></span>planta DXF (referência)</div>
     </div>
     <div id="nav-hint">Esquerdo: selecionar · Scroll: zoom · Meio: pan · Shift+Meio: orbit</div>
+    <div id="hover-tooltip"></div>
+    <div id="quick-edit-bar"><strong id="quick-edit-title">Elemento</strong><button data-quick-shift="-1">← 10mm</button><span id="quick-edit-size">—</span><button data-quick-shift="1">10mm →</button><button data-quick-properties>•••</button></div>
+    <div id="toast-stack" aria-live="polite"></div>
+    <div id="element-search" class="command-overlay"><div class="command-box"><input id="element-search-input" type="text" placeholder="Pesquisar parede, abertura ou bloco…"><div id="element-search-results"></div></div></div>
+    <div id="command-palette" class="command-overlay"><div class="command-box"><input id="command-input" type="text" placeholder="> Digite um comando…"><div id="command-results"></div></div></div>
+    <div id="selection-breadcrumb">Projeto</div>
     <div id="status-bar">
       <span id="status-message" class="status-cell">Pronto</span>
-      <span id="status-selected" class="status-cell">Nada selecionado</span>
-      <span id="status-wall" class="status-cell">Parede: —</span>
-      <span id="status-course" class="status-cell">Fiada: Todas</span>
+      <span id="status-selected" class="legacy-status">Nada selecionado</span><span id="status-kind" class="legacy-status">Tipo: —</span><span id="status-wall" class="legacy-status">Parede: —</span><span id="status-metrics" class="legacy-status">Dimensões: —</span><span id="status-modulation" class="legacy-status">Modulação: —</span><span id="status-alerts" class="legacy-status">Alertas: 0</span><span id="status-course" class="legacy-status">Fiada: Todas</span><span id="status-snap" class="legacy-status">Snap: 1 cm</span><span id="status-scale" class="legacy-status">Movimento: 1 cm</span>
+      <span class="footer-spacer"></span>
+      <button id="projection-mode" title="Alternar perspectiva/ortográfica">Perspectiva</button>
+      <select id="toolbar-display-mode" title="Modo visual"><option value="realistic">Realista</option><option value="structural">Estrutural</option><option value="blocks">Blocos</option><option value="walls">Paredes</option><option value="xray">Raio-X</option><option value="wireframe">Wireframe</option><option value="diagnostic">Diagnóstico</option><option value="openings">Aberturas</option><option value="wall-view">Vista por parede</option></select>
+      <button id="toggle-shadows" title="Alternar sombras">Sombras</button>
+      <button id="footer-section" title="Plano de corte">Corte</button>
+      <button id="btn-realtime" class="active" title="Modulação em tempo real">Tempo real</button>
+      <select id="snap-step" title="Precisão do snap"><option value="0.1">Snap 1mm</option><option value="0.5">Snap 5mm</option><option value="1" selected>Snap 10mm</option><option value="5">Snap 50mm</option><option value="0">Snap off</option></select>
+      <button id="course-previous" title="Fiada anterior">‹</button><select id="toolbar-course-filter" title="Fiada visível"><option value="">Fiada: Todas</option></select><button id="course-next" title="Próxima fiada">›</button>
       <span id="status-coordinates" class="status-cell">X 0,00 · Y 0,00 · Z 0,00 m</span>
-      <span id="status-snap" class="status-cell">Snap: 1 cm</span>
-      <span id="status-scale" class="status-cell">Movimento: 1 cm</span>
     </div>
   </div>
 </div>
@@ -854,12 +911,14 @@ function clearSelectionHighlight() {
   selectedWallId = null;
   hideOpeningContextMenu();
   document.getElementById('btn-auto-adjust').disabled = !currentModelId;
+  window.dispatchEvent(new CustomEvent('editor:selection-changed', { detail: { object: null, instanceId: null } }));
   requestRender();
 }
 
 function selectObject(obj, instanceId = null) {
   clearSelectionHighlight();
   selectedObject = obj;
+  selectedObject.userData.selectedInstanceId = instanceId;
   if (obj.userData.kind !== 'block-instances' && obj.material && obj.material.color) {
     selectedOriginalColor = obj.material.color.clone();
     obj.material.color.set(0xffffff);
@@ -919,6 +978,7 @@ function selectObject(obj, instanceId = null) {
       + `(${e.end[0].toFixed(1)}, ${e.end[1].toFixed(1)})</div>`
       + `<div class="sel-row">Wall associada: ${e.wall_id || 'nenhuma (fora de uma layer de parede analisada, ou parede sem par)'}</div>`;
   }
+  window.dispatchEvent(new CustomEvent('editor:selection-changed', { detail: { object: obj, instanceId } }));
   requestRender();
 }
 

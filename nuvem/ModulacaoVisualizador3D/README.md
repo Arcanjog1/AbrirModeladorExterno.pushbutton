@@ -161,13 +161,18 @@ do arquivo DXF".
 - Histórico atômico de sessão: **Ctrl+Z/Ctrl+Y** (ou os botões ↶/↷) restaura
   juntos a geometria alterada e os blocos já calculados, sem executar o solver
   novamente. Mover uma abertura e regenerar sua região é uma única operação.
-- Controles de editor: barra superior responsiva, ViewCube com seis vistas,
-  seleção/hover, mover, girar, medir, snap configurável, Zoom Selected,
-  isolamento/ocultação, vista por Wall e modos Realista/Blocos/Paredes/
-  Raio-X/Wireframe/Diagnóstico/Aberturas/Estrutural. O inspetor de Wall
-  navega anterior/próxima, mostra conectadas, apenas blocos ou aberturas e
-  alterna entre elevação/3D/visão geral. Há filtro por fiada e plano de corte
-  horizontal ou vertical.
+- Interface BIM compacta: viewport em tela inteira, toolbar de ícones,
+  navegação flutuante, ViewCube moderno, barra CAD inferior e temas escuro/
+  claro. O painel de projeto antigo permanece disponível sob demanda, sem
+  ocupar permanentemente a área do modelo.
+- Controles de editor: seleção/hover com contorno e tooltip, mover, girar,
+  medir, snap configurável, Zoom Selected, isolamento/ocultação e modos
+  Realista/Blocos/Paredes/Raio-X/Wireframe/Diagnóstico/Aberturas/Estrutural.
+  A busca global usa **Ctrl+F** e a paleta de comandos usa **Ctrl+K/Ctrl+P**.
+- O modo de inspeção de Wall navega anterior/próxima, alterna frente/lateral/
+  3D, mostra conectadas, blocos, aberturas, números de fiada e diagnósticos.
+  O plano de corte horizontal, vertical ou alinhado à Wall tem prévia em
+  tempo real. Edições exibem comparação visual, marcadores e notificações.
 - O renderizador mantém `InstancedMesh` por tipo e Wall. Em uma edição,
   descarta e reconstrói somente os grupos das Walls afetadas; o restante da
   cena, a câmera e a seleção permanecem estáveis.
@@ -178,9 +183,9 @@ do arquivo DXF".
 py -m unittest discover -s tests -v
 ```
 
-73 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
+78 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
 `wall_validation.py`, `modulation_preview.py`, `editor_session.py`, edição
-geométrica atômica de Walls/aberturas e
+geométrica atômica de Walls/aberturas, a interface BIM responsiva e
 `oda_converter.py` —
 nenhum depende de Revit, pyRevit ou de um arquivo DXF/DWG real (geram os
 próprios arquivos de teste com `ezdxf`, e o `oda_converter.py` é testado
