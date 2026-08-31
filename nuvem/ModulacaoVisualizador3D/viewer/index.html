@@ -73,11 +73,13 @@
     #nav-hint { display: none; }
   }
 </style>
+<link rel="stylesheet" href="/viewer/editor-shell.css">
 </head>
 <body>
 <div id="app">
   <div id="sidebar">
     <h1>Modulação externa — visualizador local</h1>
+    <button id="close-project-panel" title="Fechar painel">×</button>
 
     <button id="btn-pick-dwg">Selecionar DWG</button>
     <button id="btn-pick-json" style="background:#00897b; margin-top:6px;">Selecionar Captura do Revit (JSON)</button>
@@ -151,6 +153,9 @@
       <option value="xray">Raio-X</option>
       <option value="wireframe">Wireframe</option>
       <option value="diagnostic">Diagnóstico</option>
+      <option value="openings">Aberturas</option>
+      <option value="structural">Estrutural</option>
+      <option value="wall-view">Vista por parede</option>
     </select>
     <div id="view-modes">
       <label class="checkbox-row"><input type="checkbox" id="mode-plan" checked> Planta CAD / Referência</label>
@@ -180,17 +185,30 @@
 
   </div>
   <div id="viewport">
-    <div id="selection-panel"></div>
-    <div id="opening-context-menu">
-      <button type="button" data-opening-preview="auto">Ajustar automaticamente para modulação</button>
-      <button type="button" data-opening-preview="-5">Visualizar mover -5cm</button>
-      <button type="button" data-opening-preview="-1">Visualizar mover -1cm</button>
-      <button type="button" data-opening-preview="1">Visualizar mover +1cm</button>
-      <button type="button" data-opening-preview="5">Visualizar mover +5cm</button>
-      <div class="menu-separator"></div>
-      <button type="button" data-opening-apply-preview>Aplicar preview</button>
-      <button type="button" data-opening-cancel-preview>Cancelar preview</button>
-    </div>
+    <div id="top-toolbar">
+      <div class="toolbar-brand"><span class="toolbar-brand-mark">M</span><span class="toolbar-brand-copy"><b>Editor de Modulação</b><small>alvenaria estrutural</small></span></div>
+      <div class="toolbar-separator"></div>
+      <div class="toolbar-group">
+        <button id="btn-project-panel" title="Projeto e configurações">Projeto</button>
+        <button data-editor-tool="select" class="active" title="Selecionar (Esc)">Selecionar</button>
+        <button data-editor-tool="move" title="Mover elemento selecionado">Mover</button>
+        <button data-editor-tool="rotate" title="Rotacionar parede por valor">Girar</button>
+        <button data-editor-tool="measure" title="Medir entre dois pontos">Medir</button>
+        <button data-editor-tool="section" title="Configurar plano de corte">Corte</button>
+        <select id="snap-step" title="Precisão do snap">
+          <option value="0.1">Snap 1 mm</option><option value="0.5">Snap 5 mm</option>
+          <option value="1" selected>Snap 1 cm</option><option value="5">Snap 5 cm</option><option value="0">Snap desligado</option>
+        </select>
+      </div>
+      <div class="toolbar-separator"></div>
+      <div class="toolbar-group">
+        <button id="btn-wall-mode" title="Inspeção parede por parede">Vista por parede</button>
+        <button id="btn-isolate-selected" title="Isolar elemento ou parede">Isolar</button>
+        <button id="btn-hide-selected" title="Ocultar elemento selecionado">Ocultar</button>
+        <button id="btn-show-all" title="Restaurar toda a visibilidade">Mostrar tudo</button>
+        <button id="btn-realtime" class="active" title="Prévia de modulação durante o arraste">Tempo real</button>
+      </div>
+      <div class="toolbar-separator"></div>
     <div id="view-toolbar">
       <button class="view-btn" id="view-top">Topo</button>
       <button class="view-btn" id="view-front">Frente</button>
@@ -203,6 +221,36 @@
       <button id="btn-redo" title="Refazer (Ctrl+Y)" disabled>↷</button>
       <button id="view-selected" title="Zoom Selected">Focar seleção</button>
     </div>
+    </div>
+    <div id="selection-panel"></div>
+    <div id="opening-context-menu">
+      <button type="button" data-opening-preview="auto">Ajustar automaticamente para modulação</button>
+      <button type="button" data-opening-preview="-5">Visualizar mover -5cm</button>
+      <button type="button" data-opening-preview="-1">Visualizar mover -1cm</button>
+      <button type="button" data-opening-preview="1">Visualizar mover +1cm</button>
+      <button type="button" data-opening-preview="5">Visualizar mover +5cm</button>
+      <div class="menu-separator"></div>
+      <button type="button" data-opening-apply-preview>Aplicar preview</button>
+      <button type="button" data-opening-cancel-preview>Cancelar preview</button>
+    </div>
+    <div id="wall-inspector">
+      <div class="panel-titlebar"><strong id="wall-inspector-title">Inspeção de parede</strong><button id="close-wall-inspector">×</button></div>
+      <div class="wall-inspector-actions">
+        <button id="wall-previous">← Parede anterior</button><button id="wall-next">Próxima parede →</button>
+        <button id="wall-isolate">Isolar atual</button><button id="wall-connected">Conectadas</button>
+        <button id="wall-only-blocks">Só blocos</button><button id="wall-only-openings">Só aberturas</button>
+        <button id="wall-elevation">Elevação</button><button id="wall-3d">3D</button><button id="wall-restore">Visão geral</button>
+      </div>
+      <div id="wall-inspector-summary"></div>
+    </div>
+    <div id="element-context-menu">
+      <button data-context-action="move">Mover</button>
+      <button data-context-action="properties">Propriedades</button>
+      <button data-context-action="isolate">Isolar</button>
+      <button data-context-action="wall-view">Vista da parede</button>
+      <button data-context-action="diagnostic">Diagnóstico</button>
+      <button data-context-action="hide">Ocultar</button>
+    </div>
     <div id="view-cube" aria-label="ViewCube">
       <button id="cube-top" data-view="top">TOP</button><button id="cube-bottom" data-view="bottom">BOT</button>
       <button id="cube-front" data-view="front">FR</button><button id="cube-back" data-view="back">BK</button>
@@ -214,6 +262,15 @@
       <div><span style="background:#5588cc"></span>planta DXF (referência)</div>
     </div>
     <div id="nav-hint">Esquerdo: selecionar · Scroll: zoom · Meio: pan · Shift+Meio: orbit</div>
+    <div id="status-bar">
+      <span id="status-message" class="status-cell">Pronto</span>
+      <span id="status-selected" class="status-cell">Nada selecionado</span>
+      <span id="status-wall" class="status-cell">Parede: —</span>
+      <span id="status-course" class="status-cell">Fiada: Todas</span>
+      <span id="status-coordinates" class="status-cell">X 0,00 · Y 0,00 · Z 0,00 m</span>
+      <span id="status-snap" class="status-cell">Snap: 1 cm</span>
+      <span id="status-scale" class="status-cell">Movimento: 1 cm</span>
+    </div>
   </div>
 </div>
 
@@ -295,6 +352,39 @@ function clearGroup(group) {
   }
 }
 
+function disposeSceneObject(child) {
+  if (child.children && child.children.length) clearGroup(child);
+  if (child.geometry) child.geometry.dispose();
+  if (Array.isArray(child.material)) child.material.forEach(material => material.dispose());
+  else if (child.material) child.material.dispose();
+}
+
+function removeGroupChildren(group, predicate) {
+  for (let index = group.children.length - 1; index >= 0; index--) {
+    const child = group.children[index];
+    if (!predicate(child)) continue;
+    group.remove(child);
+    disposeSceneObject(child);
+  }
+}
+
+function wallIdentitySet(wall) {
+  return new Set([wall && wall.id, wall && wall.element_id, wall && wall.wall_group_id]
+    .concat((wall && wall.source_wall_ids) || []).map(value => String(value || '')).filter(Boolean));
+}
+
+function candidateIdentitySet(candidate) {
+  return new Set([candidate && candidate.wall_id]
+    .concat((candidate && candidate.primary_source_wall_ids) || [])
+    .concat((candidate && candidate.secondary_source_wall_ids) || [])
+    .map(value => String(value || '')).filter(Boolean));
+}
+
+function setsIntersect(left, right) {
+  for (const value of left) if (right.has(value)) return true;
+  return false;
+}
+
 function resetWalls() {
   clearGroup(wallGroup);
   clearGroup(axesGroup);
@@ -370,17 +460,26 @@ function blockShellParts(candidate) {
   return parts;
 }
 
-function renderSolvedBlocks(candidates) {
-  clearGroup(blocksGroup);
+function renderSolvedBlocks(candidates, affectedWallIds = null) {
+  if (affectedWallIds) {
+    removeGroupChildren(blocksGroup, child => setsIntersect(new Set(child.userData.wallIds || []), affectedWallIds));
+  } else {
+    clearGroup(blocksGroup);
+  }
   const buckets = new Map();
   (candidates || []).filter(candidate => (
     activeCourseIndex === null || Number(candidate.course_index) === activeCourseIndex
+  )).filter(candidate => (
+    !affectedWallIds || setsIntersect(candidateIdentitySet(candidate), affectedWallIds)
+  )).filter(candidate => (
+    !window.editorCandidateVisible || window.editorCandidateVisible(candidate)
   )).forEach(candidate => {
     blockShellParts(candidate).forEach((part, partIndex) => {
       const size = part.size_cm;
       const color = rgbColor(candidate.color_rgb);
-      const key = `${size[0].toFixed(3)}|${size[1].toFixed(3)}|${candidate.height_cm.toFixed(3)}|${color}`;
-      if (!buckets.has(key)) buckets.set(key, { size, color, entries: [] });
+      const wallKey = [...candidateIdentitySet(candidate)].sort().join(',') || `junction:${JSON.stringify(candidate.solver_group_key || [])}`;
+      const key = `${wallKey}|${size[0].toFixed(3)}|${size[1].toFixed(3)}|${candidate.height_cm.toFixed(3)}|${color}`;
+      if (!buckets.has(key)) buckets.set(key, { size, color, wallKey, entries: [] });
       buckets.get(key).entries.push({ candidate, part, partIndex });
     });
   });
@@ -396,7 +495,13 @@ function renderSolvedBlocks(candidates) {
     );
     const material = new THREE.MeshLambertMaterial({ color: bucket.color });
     const mesh = new THREE.InstancedMesh(geometry, material, bucket.entries.length);
-    mesh.userData = { kind: 'block-instances', instances: bucket.entries };
+    const meshCandidates = bucket.entries.map(entry => entry.candidate);
+    mesh.userData = {
+      kind: 'block-instances', instances: bucket.entries, candidates: meshCandidates,
+      wallIds: [...meshCandidates.reduce((result, candidate) => {
+        candidateIdentitySet(candidate).forEach(value => result.add(value)); return result;
+      }, new Set())],
+    };
     bucket.entries.forEach((entry, index) => {
       const candidate = entry.candidate;
       const local = entry.part.center_cm || [0, 0];
@@ -453,6 +558,7 @@ function addBlockPreviewBoxes(wall, length, thickness, height, baseZ, angle, cen
       const edge = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x153018, opacity: 0.55, transparent: true }));
       edge.position.copy(mesh.position);
       edge.rotation.copy(mesh.rotation);
+      edge.userData = { kind: 'block-edge', wall };
       blocksGroup.add(edge);
       offset += usableLength + (index < row.length - 1 ? joint : 0);
     });
@@ -487,7 +593,7 @@ function addWallSolid(wall, segment, materialInfo) {
   const edgeLine = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, opacity: 0.4, transparent: true }));
   edgeLine.position.copy(mesh.position);
   edgeLine.rotation.copy(mesh.rotation);
-  edgeLine.userData = { kind: 'wall-edge', isError: materialInfo.isError };
+  edgeLine.userData = { kind: 'wall-edge', wall, isError: materialInfo.isError };
   wallGroup.add(edgeLine);
 }
 
@@ -519,7 +625,9 @@ function addWallBox(wall) {
   const axisGeom = new THREE.BufferGeometry().setFromPoints([
     new THREE.Vector3(x0, y0, 1), new THREE.Vector3(x1, y1, 1),
   ]);
-  axesGroup.add(new THREE.Line(axisGeom, new THREE.LineBasicMaterial({ color: 0xffdd55 })));
+  const axisLine = new THREE.Line(axisGeom, new THREE.LineBasicMaterial({ color: 0xffdd55 }));
+  axisLine.userData = { kind: 'wall-axis', wall };
+  axesGroup.add(axisLine);
 
   // divisões de blocos (aproximado: soma cumulativa dos comprimentos de
   // wall.modulation.blocks, sem contar juntas separadamente - referência
@@ -543,6 +651,7 @@ function addWallBox(wall) {
       const boundaryLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), boundaryMat);
       boundaryLine.position.set((x0 + x1) / 2, (y0 + y1) / 2, baseZ);
       boundaryLine.rotation.z = angle;
+      boundaryLine.userData = { kind: 'block-boundary', wall };
       blocksGroup.add(boundaryLine);
     }
   }
@@ -657,19 +766,23 @@ function applyDisplayMode() {
   const xray = mode === 'xray';
   const wireframe = mode === 'wireframe';
   const diagnostic = mode === 'diagnostic';
-  wallGroup.visible = mode !== 'blocks';
-  blocksGroup.visible = mode !== 'walls' && document.getElementById('mode-blocks').checked;
+  const openingsOnly = mode === 'openings';
+  const structural = mode === 'structural';
+  wallGroup.visible = mode !== 'blocks' && !openingsOnly;
+  blocksGroup.visible = mode !== 'walls' && !openingsOnly && document.getElementById('mode-blocks').checked;
   openingsGroup.visible = document.getElementById('mode-openings').checked;
+  planGroup.visible = !structural && document.getElementById('mode-plan').checked;
   wallGroup.traverse(item => {
     if (!item.material) return;
     const materials = Array.isArray(item.material) ? item.material : [item.material];
     materials.forEach(material => {
       material.wireframe = wireframe;
-      material.transparent = xray || material.transparent;
-      if (xray) material.opacity = Math.min(material.opacity, 0.16);
+      material.transparent = xray || structural || material.transparent;
+      if (xray || structural) material.opacity = Math.min(material.opacity, structural ? 0.1 : 0.16);
       if (diagnostic && item.userData.kind === 'wall' && item.userData.isError) material.color.set(0xe53935);
     });
   });
+  if (window.applyEditorVisibility) window.applyEditorVisibility();
   requestRender();
 }
 
@@ -844,7 +957,14 @@ function worldPointAt(clientX, clientY) {
   mouseNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(mouseNdc, camera);
   const point = new THREE.Vector3();
-  return raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), point) ? point : null;
+  if (!raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), point)) return null;
+  const snap = Number(window.editorSnapCm || 0);
+  if (snap > 0) {
+    point.x = Math.round(point.x / snap) * snap;
+    point.y = Math.round(point.y / snap) * snap;
+    point.z = Math.round(point.z / snap) * snap;
+  }
+  return point;
 }
 
 function beginWallEdit(mode) {
@@ -933,6 +1053,7 @@ async function commitInteractiveEdit(session, point) {
 }
 
 function scheduleInteractivePreview(session, point) {
+  if (window.editorRealtimeEnabled === false) return;
   if (editPreviewTimer) window.clearTimeout(editPreviewTimer);
   editPreviewTimer = window.setTimeout(async () => {
     if (editSession !== session || !currentModelId || !point) return;
@@ -1083,6 +1204,12 @@ function setStatus(text, isError) {
   const el = document.getElementById('status');
   el.textContent = text || '';
   el.style.color = isError ? '#ff6b6b' : '#ffb454';
+  const bar = document.getElementById('status-message');
+  if (bar) {
+    bar.textContent = text || 'Pronto';
+    bar.classList.toggle('status-error', Boolean(isError));
+    bar.title = text || '';
+  }
 }
 
 function parseLayers() {
@@ -1224,9 +1351,20 @@ async function loadLayers() {
   }
 }
 
-function renderOpenings(openings) {
-  clearGroup(openingsGroup);
-  (openings || []).forEach(op => {
+function openingIdentitySet(opening) {
+  return new Set([opening && opening.wall_id, opening && opening.wall_group_id, opening && opening.host_wall_id]
+    .map(value => String(value || '')).filter(Boolean));
+}
+
+function renderOpenings(openings, affectedWallIds = null) {
+  if (affectedWallIds) {
+    removeGroupChildren(openingsGroup, child => child.userData.opening
+      && setsIntersect(openingIdentitySet(child.userData.opening), affectedWallIds));
+  } else {
+    clearGroup(openingsGroup);
+  }
+  (openings || []).filter(op => !affectedWallIds
+    || setsIntersect(openingIdentitySet(op), affectedWallIds)).forEach(op => {
     const [cx, cy] = op.center_cm;
     const w = op.width_cm || 80;
     const thickness = op.wall_thickness_cm || 16;
@@ -1253,13 +1391,21 @@ function renderOpenings(openings) {
     const edgeLine = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x00e5ff, opacity: 0.9, transparent: true }));
     edgeLine.position.copy(mesh.position);
     edgeLine.rotation.copy(mesh.rotation);
+    edgeLine.userData = { kind: 'opening-edge', opening: op };
     openingsGroup.add(edgeLine);
   });
   openingsGroup.visible = document.getElementById('mode-openings').checked;
 }
 
 function renderModulationData(data, options = {}) {
-  resetWalls();
+  const previousModelId = currentModelId;
+  const affectedWallIds = new Set(((data.edit || {}).affected_wall_ids || [])
+    .concat((data.edit || {}).source_wall_ids || [])
+    .concat((data.edit || {}).processed_source_wall_ids || [])
+    .map(value => String(value || '')).filter(Boolean));
+  const incremental = affectedWallIds.size > 0 && previousModelId
+    && previousModelId === data.model_id && wallGroup.children.length > 0;
+  if (!incremental) resetWalls();
   currentWalls = data.walls || [];
   currentOpenings = data.openings || [];
   currentBlockCandidates = data.block_candidates || [];
@@ -1270,16 +1416,25 @@ function renderModulationData(data, options = {}) {
     committedViewData = data;
     activePreviewAction = null;
   }
-  currentWalls.forEach(addWallBox);
+  if (incremental) {
+    removeGroupChildren(wallGroup, child => child.userData.wall
+      && setsIntersect(wallIdentitySet(child.userData.wall), affectedWallIds));
+    removeGroupChildren(axesGroup, child => child.userData.wall
+      && setsIntersect(wallIdentitySet(child.userData.wall), affectedWallIds));
+    removeGroupChildren(blocksGroup, child => child.userData.wall
+      && setsIntersect(wallIdentitySet(child.userData.wall), affectedWallIds));
+  }
+  currentWalls.filter(wall => !incremental
+    || setsIntersect(wallIdentitySet(wall), affectedWallIds)).forEach(addWallBox);
   updateCourseFilter();
-  if (currentBlockCandidates.length) renderSolvedBlocks(currentBlockCandidates);
-  renderOpenings(currentOpenings);
+  if (currentBlockCandidates.length) renderSolvedBlocks(currentBlockCandidates, incremental ? affectedWallIds : null);
+  renderOpenings(currentOpenings, incremental ? affectedWallIds : null);
   applyWallVisibility();
   blocksGroup.visible = document.getElementById('mode-blocks').checked;
   axesGroup.visible = document.getElementById('mode-axes').checked;
-  document.getElementById('selection-panel').innerHTML = '';
+  if (!incremental || !options.preview) document.getElementById('selection-panel').innerHTML = '';
 
-  if (data.entities && data.entities.length) {
+  if (!incremental && data.entities && data.entities.length) {
     currentEntities = data.entities;
     resetPlan();
     currentEntities.forEach(addPlanEntity);
@@ -1287,7 +1442,7 @@ function renderModulationData(data, options = {}) {
     planGroup.visible = document.getElementById('mode-plan').checked;
   }
 
-  frameCamera(currentWalls, currentEntities);
+  if (!incremental && !options.preview) frameCamera(currentWalls, currentEntities);
 
   const closesCount = currentWalls.filter(w => w.modulation && w.modulation.closes).length;
   const solver = data.block_diagnostics || {};
@@ -1327,6 +1482,8 @@ function renderModulationData(data, options = {}) {
   updateHistory(data.history);
   applyDisplayMode();
   applySectionPlane();
+  if (window.applyEditorVisibility) window.applyEditorVisibility();
+  window.dispatchEvent(new CustomEvent('editor:model-rendered', { detail: { data, options, incremental } }));
   requestRender();
 }
 
@@ -1619,5 +1776,6 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 });
 </script>
+<script src="/viewer/editor-shell.js"></script>
 </body>
 </html>

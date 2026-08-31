@@ -43,6 +43,12 @@ Rotas:
         da Wall e reaplica a mesma modulação física.
     POST /api/resize-opening        -> altera a largura de uma abertura
         hospedada, preservando-a inteiramente dentro da Wall.
+    POST /api/edit-opening          -> edita posição, largura, altura e
+        peitoril de uma abertura em uma única operação atômica.
+    POST /api/duplicate-opening     -> duplica uma abertura no mesmo host e
+        recalcula somente a componente de Walls afetada.
+    POST /api/delete-opening        -> remove uma abertura e recalcula sua
+        componente de Walls.
     POST /api/calculate-modulation  -> calcula alternativas manuais para
         uma Wall ou uma lista de Walls, usando catálogo/regras do projeto.
 """
@@ -66,6 +72,7 @@ from wall_capture import (
     openings_for_capture_view,
     solve_capture_block_candidates, adjust_capture_opening, adjust_capture_openings,
     edit_capture_wall, move_capture_opening, resize_capture_opening,
+    edit_capture_opening, duplicate_capture_opening, delete_capture_opening,
 )
 from modulation_preview import preview_walls
 from file_dialog import pick_dwg_file, pick_json_file, DialogError
@@ -290,6 +297,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_move_opening()
         if parsed.path == "/api/resize-opening":
             return self._handle_resize_opening()
+        if parsed.path == "/api/edit-opening":
+            return self._handle_edit_opening()
+        if parsed.path == "/api/duplicate-opening":
+            return self._handle_opening_collection_edit("duplicate")
+        if parsed.path == "/api/delete-opening":
+            return self._handle_opening_collection_edit("delete")
         if parsed.path == "/api/undo":
             return self._handle_history_move(-1)
         if parsed.path == "/api/redo":
@@ -652,7 +665,8 @@ class Handler(BaseHTTPRequestHandler):
         started_at = time.perf_counter()
         try:
             edited, action = edit_capture_wall(
-                capture, body.get("wall_id"), body.get("start_cm"), body.get("end_cm")
+                capture, body.get("wall_id"), body.get("start_cm"), body.get("end_cm"),
+                body.get("thickness_cm"), body.get("height_cm")
             )
             if not action.get("accepted"):
                 return self._send_json(409, {"edit": action})
@@ -733,6 +747,82 @@ class Handler(BaseHTTPRequestHandler):
                 return self._preview_capture_edit(
                     model_id, edited, action, started_at, session, base_revision, body.get("revision")
                 )
+            return self._commit_capture_edit(
+                model_id, edited, action, started_at, session, base_revision, body.get("revision")
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            return self._send_json(500, {"error": str(exc)})
+
+    def _handle_edit_opening(self):
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        model_id = str(body.get("model_id") or "")
+        session = _EDITOR_SESSIONS.get(model_id)
+        if session is None:
+            return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        base_revision, state = session.current()
+        requested_base_revision = body.get("base_revision")
+        if requested_base_revision is not None and int(requested_base_revision) != base_revision:
+            return self._send_json(409, {
+                "error": "O modelo mudou desde o início da edição.",
+                "revision": base_revision, "history": session.history_summary(),
+            })
+        started_at = time.perf_counter()
+        try:
+            edited, action = edit_capture_opening(
+                state["capture"], body.get("opening_id"), body.get("center_cm"),
+                body.get("width_cm"), body.get("height_cm"), body.get("sill_cm"),
+            )
+            if not action.get("accepted"):
+                return self._send_json(409, {"edit": action})
+            action["history_label"] = "Editar abertura {}".format(
+                action.get("opening_id") or body.get("opening_id")
+            )
+            if body.get("preview"):
+                return self._preview_capture_edit(
+                    model_id, edited, action, started_at, session, base_revision, body.get("revision")
+                )
+            return self._commit_capture_edit(
+                model_id, edited, action, started_at, session, base_revision, body.get("revision")
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            return self._send_json(500, {"error": str(exc)})
+
+    def _handle_opening_collection_edit(self, operation):
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        model_id = str(body.get("model_id") or "")
+        session = _EDITOR_SESSIONS.get(model_id)
+        if session is None:
+            return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        base_revision, state = session.current()
+        requested_base_revision = body.get("base_revision")
+        if requested_base_revision is not None and int(requested_base_revision) != base_revision:
+            return self._send_json(409, {
+                "error": "O modelo mudou desde o início da edição.",
+                "revision": base_revision, "history": session.history_summary(),
+            })
+        started_at = time.perf_counter()
+        try:
+            if operation == "duplicate":
+                edited, action = duplicate_capture_opening(
+                    state["capture"], body.get("opening_id"), body.get("delta_cm", 10.0)
+                )
+                label = "Duplicar abertura {}".format(body.get("opening_id"))
+            else:
+                edited, action = delete_capture_opening(
+                    state["capture"], body.get("opening_id")
+                )
+                label = "Excluir abertura {}".format(body.get("opening_id"))
+            if not action.get("accepted"):
+                return self._send_json(409, {"edit": action})
+            action["history_label"] = label
             return self._commit_capture_edit(
                 model_id, edited, action, started_at, session, base_revision, body.get("revision")
             )

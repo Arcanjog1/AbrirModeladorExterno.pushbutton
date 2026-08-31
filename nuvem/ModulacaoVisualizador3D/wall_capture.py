@@ -25,7 +25,10 @@ FT_TO_CM = 100.0 / FEET_PER_METER
 FIRST_COURSE_Z_OFFSET_CM = 1.0
 OPENING_COURSE_BAND_TOLERANCE_CM = 0.5
 MIN_EDITABLE_WALL_LENGTH_CM = 1.0
+MIN_EDITABLE_WALL_THICKNESS_CM = 1.0
+MIN_EDITABLE_WALL_HEIGHT_CM = 1.0
 MIN_EDITABLE_OPENING_WIDTH_CM = 1.0
+MIN_EDITABLE_OPENING_HEIGHT_CM = 1.0
 
 
 def _xy_point(value, field_name):
@@ -795,7 +798,8 @@ def _group_source_ids(capture, group_keys):
     return sorted(ids)
 
 
-def edit_capture_wall(capture, wall_id, start_cm=None, end_cm=None):
+def edit_capture_wall(capture, wall_id, start_cm=None, end_cm=None,
+                      thickness_cm=None, height_cm=None):
     """Edita uma Wall contínua e propaga o deslocamento às suas aberturas.
 
     Esta é a única porta de edição geométrica do modelo externo. Ela mantém
@@ -821,6 +825,28 @@ def edit_capture_wall(capture, wall_id, start_cm=None, end_cm=None):
             ),
         }
 
+    try:
+        new_thickness = (float(thickness_cm) if thickness_cm is not None
+                         else float(display_wall.get("thickness_cm") or 0.0))
+        new_height = (float(height_cm) if height_cm is not None
+                      else float(display_wall.get("height_cm") or 0.0))
+    except (TypeError, ValueError):
+        return capture, {"accepted": False, "reason": "espessura ou altura da parede invalida"}
+    if not math.isfinite(new_thickness) or new_thickness < MIN_EDITABLE_WALL_THICKNESS_CM:
+        return capture, {
+            "accepted": False,
+            "reason": "a parede deve manter pelo menos {:.0f}cm de espessura".format(
+                MIN_EDITABLE_WALL_THICKNESS_CM
+            ),
+        }
+    if not math.isfinite(new_height) or new_height < MIN_EDITABLE_WALL_HEIGHT_CM:
+        return capture, {
+            "accepted": False,
+            "reason": "a parede deve manter pelo menos {:.0f}cm de altura".format(
+                MIN_EDITABLE_WALL_HEIGHT_CM
+            ),
+        }
+
     source_ids = _source_ids_for_display_wall(display_wall)
     trial = copy.deepcopy(capture)
     changed_wall_ids = []
@@ -834,6 +860,9 @@ def edit_capture_wall(capture, wall_id, start_cm=None, end_cm=None):
         end_t, _unused = _line_projection(raw_end, old_start, old_end)
         raw["start_cm"] = _point_on_line(new_start, new_end, start_t)
         raw["end_cm"] = _point_on_line(new_start, new_end, end_t)
+        raw["thickness_cm"] = round(new_thickness, 6)
+        raw["height_cm"] = round(new_height, 6)
+        raw["top_z_cm"] = round(float(raw.get("base_z_cm") or 0.0) + new_height, 6)
         raw.pop("start", None)
         raw.pop("end", None)
         changed_wall_ids.extend(_raw_wall_ids(raw))
@@ -862,6 +891,8 @@ def edit_capture_wall(capture, wall_id, start_cm=None, end_cm=None):
         "start_cm": list(new_start),
         "end_cm": list(new_end),
         "length_cm": round(new_length, 3),
+        "thickness_cm": round(new_thickness, 3),
+        "height_cm": round(new_height, 3),
         "recalculation_scope": "nivel_e_faixa_da_parede",
         "solver_group_keys": _group_keys_for_source_ids(trial, source_ids),
         "processed_source_wall_ids": _group_source_ids(
@@ -969,6 +1000,169 @@ def resize_capture_opening(capture, opening_id, width_cm):
     }
 
 
+def edit_capture_opening(capture, opening_id, center_cm=None, width_cm=None,
+                         height_cm=None, sill_cm=None):
+    """Aplica posição e dimensões de uma abertura como uma única operação.
+
+    Todas as etapas trabalham numa cópia e só devolvem o snapshot novo se a
+    abertura continuar dentro do prisma da Wall hospedeira. O chamador executa
+    o solver canônico uma única vez e registra um único item de Undo/Redo.
+    """
+    opening_id = str(opening_id or "")
+    source = next(
+        (item for item in capture.get("openings") or []
+         if str(item.get("element_id") or "") == opening_id), None,
+    )
+    if source is None:
+        return capture, {"accepted": False, "reason": "abertura nao encontrada"}
+
+    trial = capture
+    if center_cm is not None:
+        trial, action = move_capture_opening(trial, opening_id, center_cm)
+        if not action.get("accepted"):
+            return capture, action
+    if width_cm is not None:
+        trial, action = resize_capture_opening(trial, opening_id, width_cm)
+        if not action.get("accepted"):
+            return capture, action
+    if trial is capture:
+        trial = copy.deepcopy(capture)
+
+    opening = next(
+        item for item in trial.get("openings") or []
+        if str(item.get("element_id") or "") == opening_id
+    )
+    axis = _opening_wall_axis(trial, opening)
+    if axis is None:
+        return capture, {"accepted": False, "reason": "parede hospedeira nao identificada"}
+
+    current_sill = float(opening.get("sill_cm") or 0.0)
+    current_height = float(opening.get("height_cm") or
+                           (float(opening.get("head_cm") or 0.0) - current_sill))
+    try:
+        requested_sill = current_sill if sill_cm is None else float(sill_cm)
+        requested_height = current_height if height_cm is None else float(height_cm)
+    except (TypeError, ValueError):
+        return capture, {"accepted": False, "reason": "altura ou peitoril da abertura invalido"}
+    if not math.isfinite(requested_height) or requested_height < MIN_EDITABLE_OPENING_HEIGHT_CM:
+        return capture, {
+            "accepted": False,
+            "reason": "a abertura deve manter pelo menos {:.0f}cm de altura".format(
+                MIN_EDITABLE_OPENING_HEIGHT_CM
+            ),
+        }
+    if not math.isfinite(requested_sill):
+        return capture, {"accepted": False, "reason": "peitoril da abertura invalido"}
+    requested_head = requested_sill + requested_height
+    wall_base = axis["base_z_cm"]
+    wall_top = wall_base + axis["height_cm"]
+    if requested_sill < wall_base - 1e-6 or requested_head > wall_top + 1e-6:
+        return capture, {
+            "accepted": False,
+            "reason": "a abertura deve permanecer inteiramente dentro da altura da parede hospedeira",
+        }
+
+    opening["sill_cm"] = round(requested_sill, 6)
+    opening["height_cm"] = round(requested_height, 6)
+    opening["head_cm"] = round(requested_head, 6)
+    source_ids = {str(axis["wall_id"])}
+    groups = _group_keys_for_source_ids(trial, source_ids)
+    return trial, {
+        "accepted": True,
+        "opening_id": opening_id,
+        "wall_id": axis["wall_id"],
+        "center_cm": list(opening.get("center_cm") or []),
+        "width_cm": float(opening.get("width_cm") or 0.0),
+        "height_cm": opening["height_cm"],
+        "sill_cm": opening["sill_cm"],
+        "head_cm": opening["head_cm"],
+        "affected_wall_ids": _affected_wall_ids(trial, source_ids),
+        "recalculation_scope": "nivel_e_faixa_da_parede",
+        "solver_group_keys": groups,
+        "processed_source_wall_ids": _group_source_ids(trial, groups),
+    }
+
+
+def duplicate_capture_opening(capture, opening_id, delta_cm=10.0):
+    """Duplica uma abertura na mesma Wall, deslocada ao longo do eixo."""
+    opening_id = str(opening_id or "")
+    source = next(
+        (item for item in capture.get("openings") or []
+         if str(item.get("element_id") or "") == opening_id), None,
+    )
+    if source is None:
+        return capture, {"accepted": False, "reason": "abertura nao encontrada"}
+    axis = _opening_wall_axis(capture, source)
+    if axis is None:
+        return capture, {"accepted": False, "reason": "parede hospedeira nao identificada"}
+    try:
+        requested_delta = float(delta_cm)
+    except (TypeError, ValueError):
+        return capture, {"accepted": False, "reason": "deslocamento da copia invalido"}
+    existing = set(str(item.get("element_id") or "") for item in capture.get("openings") or [])
+    suffix = 1
+    new_id = "{}__copy{}".format(opening_id, suffix)
+    while new_id in existing:
+        suffix += 1
+        new_id = "{}__copy{}".format(opening_id, suffix)
+
+    half_width = float(source.get("width_cm") or 0.0) / 2.0
+    choices = [requested_delta, -requested_delta]
+    chosen = next((delta for delta in choices
+                   if axis["opening_t_cm"] + delta - half_width >= -1e-6
+                   and axis["opening_t_cm"] + delta + half_width <= axis["length_cm"] + 1e-6), None)
+    if chosen is None:
+        return capture, {"accepted": False, "reason": "nao ha espaco na parede para duplicar a abertura"}
+    trial = copy.deepcopy(capture)
+    duplicated = copy.deepcopy(source)
+    duplicated["element_id"] = new_id
+    center = duplicated.get("center_cm") or [0.0, 0.0]
+    duplicated["center_cm"] = [
+        round(float(center[0]) + axis["x_dir"] * chosen, 6),
+        round(float(center[1]) + axis["y_dir"] * chosen, 6),
+    ]
+    duplicated["editor_created"] = True
+    trial.setdefault("openings", []).append(duplicated)
+    source_ids = {str(axis["wall_id"])}
+    groups = _group_keys_for_source_ids(trial, source_ids)
+    return trial, {
+        "accepted": True, "opening_id": new_id, "source_opening_id": opening_id,
+        "wall_id": axis["wall_id"], "delta_cm": round(chosen, 3),
+        "affected_wall_ids": _affected_wall_ids(trial, source_ids),
+        "recalculation_scope": "nivel_e_faixa_da_parede",
+        "solver_group_keys": groups,
+        "processed_source_wall_ids": _group_source_ids(trial, groups),
+    }
+
+
+def delete_capture_opening(capture, opening_id):
+    """Remove uma abertura do snapshot do editor e invalida somente sua Wall."""
+    opening_id = str(opening_id or "")
+    source = next(
+        (item for item in capture.get("openings") or []
+         if str(item.get("element_id") or "") == opening_id), None,
+    )
+    if source is None:
+        return capture, {"accepted": False, "reason": "abertura nao encontrada"}
+    axis = _opening_wall_axis(capture, source)
+    if axis is None:
+        return capture, {"accepted": False, "reason": "parede hospedeira nao identificada"}
+    trial = copy.deepcopy(capture)
+    trial["openings"] = [
+        item for item in trial.get("openings") or []
+        if str(item.get("element_id") or "") != opening_id
+    ]
+    source_ids = {str(axis["wall_id"])}
+    groups = _group_keys_for_source_ids(trial, source_ids)
+    return trial, {
+        "accepted": True, "opening_id": opening_id, "wall_id": axis["wall_id"],
+        "affected_wall_ids": _affected_wall_ids(trial, source_ids),
+        "recalculation_scope": "nivel_e_faixa_da_parede",
+        "solver_group_keys": groups,
+        "processed_source_wall_ids": _group_source_ids(trial, groups),
+    }
+
+
 def _opening_wall_axis(capture, opening):
     host_id = str(opening.get("host_wall_id") or "")
     center = opening.get("center_cm") or [0.0, 0.0]
@@ -992,6 +1186,9 @@ def _opening_wall_axis(capture, opening):
             candidate = {
                 "x_dir": ux, "y_dir": uy, "wall_id": wall_id,
                 "length_cm": length, "opening_t_cm": t,
+                "base_z_cm": float(wall.get("base_z_cm") or 0.0),
+                "height_cm": float(wall.get("height_cm") or
+                                   (float(capture.get("wall_height_m") or 2.8) * 100.0)),
             }
             if host_id:
                 return candidate

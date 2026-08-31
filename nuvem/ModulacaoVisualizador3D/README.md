@@ -89,9 +89,10 @@ do arquivo DXF".
 - `wall_capture.py`: para capturas JSON do Revit, executa o solver completo
   de amarrações L/T/X por nível e faixa vertical, respeitando juntas,
   aberturas, fiadas e o catálogo real exportado das famílias.
-- `server.py` + `viewer/index.html`: visualizador 3D local (Three.js) com
-  cache por arquivo, blocos vazados instanciados, renderização sob demanda,
-  elevações reais e inspetor contextual por clique.
+- `server.py` + `viewer/index.html` + `viewer/editor-shell.*`: editor 3D
+  local (Three.js) em tela cheia, sem barra lateral fixa, com painéis
+  flutuantes, cache por arquivo, blocos vazados instanciados, renderização
+  incremental, elevações reais e inspetor contextual por clique.
 - `file_dialog.py` + `oda_converter.py`: botão "Selecionar DWG" ->
   caixa de seleção nativa do Windows -> conversão automática para DXF
   via ODA File Converter instalado -> carregamento automático no
@@ -116,11 +117,12 @@ do arquivo DXF".
   origem e a parede a que ela foi associada (`wall_pairing.
   associate_entities_with_walls` — aproximação geométrica, não um
   rastreamento exato interno do motor).
-- Edição dinâmica da captura Revit: selecione uma Wall e use **Arrastar
-  parede/início/fim**, ou selecione uma abertura e use **Arrastar abertura**.
-  Ao soltar, o visualizador propaga a geometria hospedada e recalcula os
-  blocos pelo mesmo solver físico; o inspetor mostra o motivo exato caso a
-  Wall deixe de ser modulável.
+- Edição dinâmica da captura Revit: selecione uma Wall ou abertura para
+  editar numericamente eixo, comprimento, ângulo, espessura, altura,
+  posição, largura, peitoril e altura do vão. A abertura também pode ser
+  movida, duplicada ou excluída. Cada ação propaga a geometria hospedada e
+  recalcula os blocos pelo mesmo solver físico; o inspetor mostra o motivo
+  exato caso a Wall deixe de ser modulável.
 - Calculadora manual: recebe comprimento, amarrações nas duas pontas, fiada
   e prioridade; enumera e classifica alternativas usando juntas reais e o
   catálogo carregado. Também aceita uma lista JSON de Walls independentes.
@@ -159,11 +161,16 @@ do arquivo DXF".
 - Histórico atômico de sessão: **Ctrl+Z/Ctrl+Y** (ou os botões ↶/↷) restaura
   juntos a geometria alterada e os blocos já calculados, sem executar o solver
   novamente. Mover uma abertura e regenerar sua região é uma única operação.
-- Controles de editor: ViewCube com seis vistas ortográficas, Zoom Selected,
-  modo Realista/Blocos/Paredes/Raio-X/Wireframe/Diagnóstico, filtro por fiada
-  e plano de corte horizontal ou vertical. A visualização continua usando
-  `InstancedMesh` para blocos do mesmo tipo e só o grupo de solver afetado é
-  recalculado durante a edição.
+- Controles de editor: barra superior responsiva, ViewCube com seis vistas,
+  seleção/hover, mover, girar, medir, snap configurável, Zoom Selected,
+  isolamento/ocultação, vista por Wall e modos Realista/Blocos/Paredes/
+  Raio-X/Wireframe/Diagnóstico/Aberturas/Estrutural. O inspetor de Wall
+  navega anterior/próxima, mostra conectadas, apenas blocos ou aberturas e
+  alterna entre elevação/3D/visão geral. Há filtro por fiada e plano de corte
+  horizontal ou vertical.
+- O renderizador mantém `InstancedMesh` por tipo e Wall. Em uma edição,
+  descarta e reconstrói somente os grupos das Walls afetadas; o restante da
+  cena, a câmera e a seleção permanecem estáveis.
 
 ## Testes
 
@@ -171,8 +178,9 @@ do arquivo DXF".
 py -m unittest discover -s tests -v
 ```
 
-69 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
-`wall_validation.py`, `modulation_preview.py`, `editor_session.py` e
+73 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
+`wall_validation.py`, `modulation_preview.py`, `editor_session.py`, edição
+geométrica atômica de Walls/aberturas e
 `oda_converter.py` —
 nenhum depende de Revit, pyRevit ou de um arquivo DXF/DWG real (geram os
 próprios arquivos de teste com `ezdxf`, e o `oda_converter.py` é testado
