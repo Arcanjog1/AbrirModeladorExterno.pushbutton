@@ -63,3 +63,10 @@ Nenhuma correcao feita pelo usuario sobre a modulacao dos blocos pode
 ficar apenas na conversa ou apenas no codigo. Toda correcao relevante
 deve ser registrada permanentemente no `REGRAS_MODULACAO_BLOCOS.md`,
 para que nao seja esquecida nem perdida em alteracoes futuras do sistema.
+
+## Envio obrigatório ao GitHub
+
+Toda alteração realizada localmente neste projeto deve ser versionada e enviada
+ao repositório remoto `https://github.com/Arcanjog1/AbrirModeladorExterno.pushbutton`
+em todas as sessões. Antes de enviar, preservar alterações preexistentes e não
+relacionadas de outros trabalhos.
