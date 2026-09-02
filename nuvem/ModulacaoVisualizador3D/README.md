@@ -90,9 +90,10 @@ do arquivo DXF".
   de amarrações L/T/X por nível e faixa vertical, respeitando juntas,
   aberturas, fiadas e o catálogo real exportado das famílias.
 - `server.py` + `viewer/index.html` + `viewer/editor-shell.*`: editor 3D
-  local (Three.js) em tela cheia, sem barra lateral fixa, com painéis
-  flutuantes, cache por arquivo, blocos vazados instanciados, renderização
-  incremental, elevações reais e inspetor contextual por clique.
+  local (Three.js) em tela cheia, sem barra lateral fixa, com barra de
+  aplicativo BIM, ferramentas agrupadas, drawers e painéis contextuais,
+  cache por arquivo, blocos vazados instanciados, renderização incremental,
+  elevações reais e inspetor contextual por clique.
 - `file_dialog.py` + `oda_converter.py`: botão "Selecionar DWG" ->
   caixa de seleção nativa do Windows -> conversão automática para DXF
   via ODA File Converter instalado -> carregamento automático no
@@ -145,8 +146,9 @@ do arquivo DXF".
   botão próprio, para não bloquear a geração em desenhos grandes.
 - Os ajustes são mantidos na sessão do Modelador Externo. Eles atualizam a
   Wall contínua, suas aberturas hospedadas e a componente de encontros
-  afetada; o envio das alterações aprovadas de volta ao documento Revit
-  ainda não faz parte deste fluxo.
+  afetada. O comando **Enviar ao Revit** entrega o pacote ao host WebView
+  quando o conector pyRevit está presente; no navegador comum, exporta o
+  mesmo pacote JSON para aplicação posterior pelo comando pyRevit.
 - A calculadora manual mostra hipóteses quando a geometria de um T/L/X não
   foi fornecida. A otimização global só será habilitada quando receber o
   grafo de encontros do projeto — não trata paredes isoladas como se fossem
@@ -158,21 +160,37 @@ do arquivo DXF".
   fora de ordem são descartados pela interface, e o servidor rejeita um
   commit que tenha partido de uma versão antiga do modelo. A prévia é cacheada
   por geometria/revisão e nunca altera a captura persistida.
-- Histórico atômico de sessão: **Ctrl+Z/Ctrl+Y** (ou os botões ↶/↷) restaura
+- Histórico atômico de sessão: **Ctrl+Z/Ctrl+Shift+Z** (ou **Ctrl+Y**, além
+  dos botões ↶/↷) restaura
   juntos a geometria alterada e os blocos já calculados, sem executar o solver
   novamente. Mover uma abertura e regenerar sua região é uma única operação.
-- Interface BIM compacta: viewport em tela inteira, toolbar de ícones,
-  navegação flutuante, ViewCube moderno, barra CAD inferior e temas escuro/
-  claro. O painel de projeto antigo permanece disponível sob demanda, sem
-  ocupar permanentemente a área do modelo.
-- Controles de editor: seleção/hover com contorno e tooltip, mover, girar,
+- Interface BIM compacta: viewport em tela inteira, barra superior com
+  projeto/sincronização/salvar/exportar, toolbar de ícones por categoria,
+  navegação flutuante, ViewCube, eixos XYZ, legenda semântica, barra CAD
+  inferior e temas escuro/claro. Importação, calculadora, visibilidade e
+  histórico vivem em um drawer sob demanda, sem ocupar permanentemente a
+  área do modelo.
+- Importação guiada: o drawer preserva os controles e eventos anteriores,
+  mas os apresenta nas etapas Origem, Unidades, Layers e Revisão. É possível
+  avançar e voltar sem perder valores. A visibilidade tem popover compacto,
+  enquanto o diagnóstico usa um dock inferior com Problemas, Diagnóstico,
+  Histórico, Log, Dependências e Comandos.
+- Controles de editor: seleção simples ou múltipla com **Ctrl+clique**,
+  hover com contorno e tooltip, mover, girar,
   medir, snap configurável, Zoom Selected, isolamento/ocultação e modos
   Realista/Blocos/Paredes/Raio-X/Wireframe/Diagnóstico/Aberturas/Estrutural.
   A busca global usa **Ctrl+F** e a paleta de comandos usa **Ctrl+K/Ctrl+P**.
+- Manipulação direta: parede ou abertura selecionada pode ser arrastada no
+  viewport; handles contextuais alteram extremidades, largura e peitoril. O
+  elemento acompanha o mouse a cada frame, enquanto o solver recalcula a
+  modulação afetada em segundo plano. O snap oferece 1/5/10/20mm e módulo do
+  projeto; **Shift** libera o movimento. A câmera fica bloqueada durante o drag.
 - O modo de inspeção de Wall navega anterior/próxima, alterna frente/lateral/
   3D, mostra conectadas, blocos, aberturas, números de fiada e diagnósticos.
-  O plano de corte horizontal, vertical ou alinhado à Wall tem prévia em
-  tempo real. Edições exibem comparação visual, marcadores e notificações.
+  O plano de corte horizontal, vertical ou alinhado à Wall aparece fisicamente
+  na cena, possui plano/setas arrastáveis e clipping em tempo real. O valor
+  numérico continua disponível como ajuste secundário de precisão; o lado
+  visível do corte também pode ser invertido e essa ação entra no Undo.
 - O renderizador mantém `InstancedMesh` por tipo e Wall. Em uma edição,
   descarta e reconstrói somente os grupos das Walls afetadas; o restante da
   cena, a câmera e a seleção permanecem estáveis.
@@ -183,7 +201,7 @@ do arquivo DXF".
 py -m unittest discover -s tests -v
 ```
 
-78 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
+86 testes cobrindo `dxf_reader.py`, `wall_pairing.py`, `layer_matcher.py`,
 `wall_validation.py`, `modulation_preview.py`, `editor_session.py`, edição
 geométrica atômica de Walls/aberturas, a interface BIM responsiva e
 `oda_converter.py` —

@@ -13,6 +13,7 @@ class EditorShellTests(unittest.TestCase):
         cls.html = (VIEWER / "index.html").read_text(encoding="utf-8")
         cls.css = (VIEWER / "editor-shell.css").read_text(encoding="utf-8")
         cls.javascript = (VIEWER / "editor-shell.js").read_text(encoding="utf-8")
+        cls.inline_javascript = "\n".join(re.findall(r"<script>([\s\S]*?)</script>", cls.html))
 
     def test_html_ids_are_unique(self):
         ids = re.findall(r'\bid="([^"]+)"', self.html)
@@ -21,6 +22,7 @@ class EditorShellTests(unittest.TestCase):
 
     def test_compact_bim_shell_has_the_primary_surfaces(self):
         required_ids = {
+            "app-bar",
             "top-toolbar",
             "navigation-toolbar",
             "view-cube",
@@ -37,7 +39,7 @@ class EditorShellTests(unittest.TestCase):
         self.assertTrue(required_ids.issubset(found_ids))
 
     def test_theme_tokens_and_responsive_breakpoints_are_declared(self):
-        for token in ("#202124", "#292a2d", "#303134", ':root[data-theme="light"]'):
+        for token in ("#111318", "#181b22", "#20242d", "#3b82f6", ':root[data-theme="light"]'):
             self.assertIn(token, self.css)
         for breakpoint in ("max-width: 1320px", "max-width: 900px", "min-width: 2500px"):
             self.assertIn(breakpoint, self.css)
@@ -70,6 +72,104 @@ class EditorShellTests(unittest.TestCase):
             "section-through-selection",
         ):
             self.assertIn(f'id="{control}"', self.html)
+
+    def test_direct_drag_is_the_primary_edit_flow(self):
+        for feature in (
+            "interactiveEditAt",
+            "directEditSession",
+            "startInteractivePointer",
+            "interactionPointForSession",
+            "editorUpdateDirectPreview",
+            "pointercancel",
+        ):
+            self.assertIn(feature, self.inline_javascript)
+        self.assertIn('id="drag-value-badge"', self.html)
+        self.assertIn('value="project"', self.html)
+        self.assertIn("event.shiftKey", self.inline_javascript)
+
+    def test_contextual_gizmos_and_immediate_feedback_are_wired(self):
+        for feature in (
+            "editorPickDirectHandle",
+            "directManipulationPreviewGroup",
+            "requestAnimationFrame(renderDirectPreview)",
+            "resize-start",
+            "resize-end",
+            "mode: 'sill'",
+        ):
+            self.assertIn(feature, self.javascript)
+        self.assertIn("controls.enabled = false", self.inline_javascript)
+        self.assertIn("controls.enabled = true", self.inline_javascript)
+        self.assertIn("AbortController", self.inline_javascript)
+
+    def test_section_plane_is_pickable_draggable_and_undoable(self):
+        for feature in (
+            "sectionDragHandle",
+            "sectionHitAt",
+            "applyPendingSectionDrag",
+            "pushSectionHistory",
+            "undoSection",
+            "redoSection",
+            "PlaneGeometry",
+            "ArrowHelper",
+        ):
+            self.assertIn(feature, self.javascript)
+        self.assertIn("editorSectionDragging", self.javascript)
+
+    def test_application_bar_actions_are_real_and_wired(self):
+        actions = (
+            "btn-app-import",
+            "btn-app-revit",
+            "btn-app-save",
+            "btn-app-export",
+            "btn-app-send-revit",
+            "btn-app-settings",
+            "btn-app-help",
+        )
+        for control in actions + ("processing-indicator",):
+            self.assertIn(f'id="{control}"', self.html)
+        for control in actions:
+            self.assertIn(f"byId('{control}').addEventListener", self.javascript)
+        self.assertIn("modulador:apply-to-revit", self.javascript)
+        self.assertIn("downloadExport", self.javascript)
+
+    def test_import_drawer_is_progressive_and_preserves_legacy_controls(self):
+        self.assertEqual(4, len(re.findall(r'data-import-step="[1-4]"', self.html)))
+        self.assertEqual(4, len(re.findall(r'data-import-progress="[1-4]"', self.html)))
+        for section in ("import", "calculator", "visibility", "history"):
+            self.assertIn(f'data-workspace-section="{section}"', self.html)
+        for legacy_control in ("btn-pick-dwg", "btn-pick-json", "unit-scale", "wall-layers", "btn-load"):
+            self.assertEqual(1, len(re.findall(fr'id="{legacy_control}"', self.html)))
+        self.assertIn("openWorkspaceSection", self.javascript)
+        self.assertIn("setImportStep", self.javascript)
+
+    def test_visibility_and_diagnostic_docks_are_interactive(self):
+        for control in ("btn-visibility-popover", "visibility-popover", "quick-display-mode"):
+            self.assertIn(f'id="{control}"', self.html)
+        for tab in ("problems", "element", "history", "log", "dependencies", "commands"):
+            self.assertIn(f'data-diagnostic-tab="{tab}"', self.html)
+        for feature in ("filterDiagnosticProblems", "rebuildDiagnosticDock", "data-diagnostic-action", "diagnosticSuggestion"):
+            self.assertIn(feature, self.javascript)
+
+    def test_shortcuts_and_multiple_selection_match_the_bim_workflow(self):
+        for shortcut in ("s:", "o:", "p:", "z:", "f:", "m:", "r:", "c:", "i:", "h:"):
+            self.assertIn(shortcut, self.javascript)
+        self.assertIn("i: isolateSelected", self.javascript)
+        self.assertIn("h: hideSelected", self.javascript)
+        for feature in ("multiSelectionGroup", "handleSelectionChanged", "renderMultiSelectionPanel", "event.ctrlKey || event.metaKey"):
+            self.assertIn(feature, self.javascript)
+
+    def test_section_can_invert_its_visible_side(self):
+        self.assertIn('id="section-invert"', self.html)
+        self.assertIn("sectionInverted", self.javascript)
+        self.assertIn("normal.negate()", self.javascript)
+        self.assertIn("pushSectionHistory(before, sectionSnapshot())", self.javascript)
+
+    def test_camera_extents_include_model_height(self):
+        self.assertIn(
+            "Math.max(maxX - minX, maxY - minY, maxHeight, 200)",
+            self.inline_javascript,
+        )
+        self.assertIn("camera.lookAt(controls.target)", self.inline_javascript)
 
 
 if __name__ == "__main__":

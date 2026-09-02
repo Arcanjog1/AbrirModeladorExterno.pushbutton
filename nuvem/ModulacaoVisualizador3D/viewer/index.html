@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<title>Visualizador de Modulação Externa</title>
+<title>Modulador Externo 3D</title>
 <style>
   html, body { margin: 0; height: 100%; font-family: Segoe UI, Arial, sans-serif; background: #1b1d21; color: #e8e8e8; }
   #app { display: flex; height: 100%; }
@@ -78,12 +78,28 @@
 <body>
 <div id="app">
   <div id="sidebar">
-    <h1>Modulação externa — visualizador local</h1>
+    <h1>Central do projeto</h1>
     <div class="panel-window-controls project-panel-controls">
       <button type="button" data-panel-minimize="sidebar" title="Minimizar painel">—</button>
       <button type="button" data-panel-dock="sidebar" title="Alternar encaixe">⇥</button>
       <button type="button" id="close-project-panel" title="Fechar painel">×</button>
     </div>
+
+    <div class="workspace-panel-tabs" role="tablist" aria-label="Central do projeto">
+      <button type="button" class="active" data-workspace-tab="import" role="tab">Importar</button>
+      <button type="button" data-workspace-tab="calculator" role="tab">Calculadora</button>
+      <button type="button" data-workspace-tab="visibility" role="tab">Visibilidade</button>
+      <button type="button" data-workspace-tab="history" role="tab">Histórico</button>
+    </div>
+
+    <section class="workspace-panel-section active" data-workspace-section="import">
+      <div class="import-progress" aria-label="Etapas da importação">
+        <span class="active" data-import-progress="1"><b>1</b> Origem</span>
+        <span data-import-progress="2"><b>2</b> Unidades</span>
+        <span data-import-progress="3"><b>3</b> Layers</span>
+        <span data-import-progress="4"><b>4</b> Revisão</span>
+      </div>
+      <div class="import-step active" data-import-step="1">
 
     <button id="btn-pick-dwg">Selecionar DWG</button>
     <button id="btn-pick-json" style="background:#00897b; margin-top:6px;">Selecionar Captura do Revit (JSON)</button>
@@ -91,8 +107,8 @@
     <label>Caminho do arquivo (DXF ou JSON)</label>
     <input type="text" id="dxf-path" placeholder="C:\caminho\para\captura.json ou planta.dxf">
 
-    <label>Layer(s) das paredes (separadas por vírgula, opcional)</label>
-    <input type="text" id="wall-layers" placeholder="A-WALL, ARQ-PAREDE">
+      </div>
+      <div class="import-step" data-import-step="2">
 
     <label>Unidade/escala do desenho</label>
     <select id="unit-scale">
@@ -104,8 +120,17 @@
       <option value="30.48">Pés</option>
     </select>
 
+      </div>
+      <div class="import-step" data-import-step="3">
+
+    <label>Layer(s) das paredes (separadas por vírgula, opcional)</label>
+    <input type="text" id="wall-layers" placeholder="A-WALL, ARQ-PAREDE">
+
     <button id="btn-layers" class="secondary">Analisar layers do arquivo</button>
     <div id="layers-list"></div>
+
+      </div>
+      <div class="import-step" data-import-step="4">
 
     <button id="btn-load">Gerar modulação</button>
     <button id="btn-auto-adjust" class="secondary" disabled>Ajuste automático</button>
@@ -113,6 +138,15 @@
     <div id="status"></div>
     <div id="validation-banner"></div>
     <div id="summary"></div>
+
+      </div>
+      <div class="import-navigation">
+        <button type="button" id="btn-import-back" class="secondary" disabled>Voltar</button>
+        <button type="button" id="btn-import-next">Continuar</button>
+      </div>
+    </section>
+
+    <section class="workspace-panel-section" data-workspace-section="calculator">
 
     <label>Calculadora de modulação</label>
     <input type="number" id="calc-length" min="1" step="0.1" placeholder="Comprimento da parede (cm)">
@@ -149,6 +183,10 @@
     <button id="btn-calculate-project" class="secondary">Calcular lista de paredes</button>
     <div id="calculator-results"></div>
 
+    </section>
+
+    <section class="workspace-panel-section" data-workspace-section="visibility">
+
     <label>Modos de visualização</label>
     <select id="display-mode">
       <option value="realistic">Realista</option>
@@ -184,15 +222,38 @@
     <input type="number" id="section-position" step="1" placeholder="Posição do corte (cm)">
     <button id="btn-apply-section" class="secondary">Aplicar plano de corte</button>
 
+    </section>
+
+    <section class="workspace-panel-section" data-workspace-section="history">
+
     <label>Histórico</label>
     <div id="history-list">Nenhuma edição nesta sessão.</div>
 
+    </section>
+
   </div>
   <div id="viewport">
+    <header id="app-bar">
+      <div class="app-brand"><span class="app-brand-mark">M3</span><span><strong>Modulador Externo 3D</strong><small>Ambiente BIM de modulação</small></span></div>
+      <div id="app-project-summary"><strong id="app-project-name">Sem projeto aberto</strong><small id="app-project-detail">Aguardando arquivo DWG ou captura do Revit</small></div>
+      <div id="app-sync-state" class="sync-waiting"><i></i><span>Revit aguardando captura</span></div>
+      <div class="app-primary-actions">
+        <button type="button" id="btn-app-import" title="Importar arquivo (I)">Importar</button>
+        <button type="button" id="btn-app-revit" title="Sincronizar captura do Revit">Revit</button>
+        <button type="button" id="btn-app-save" title="Salvar estado do modelo">Salvar</button>
+        <button type="button" id="btn-app-export" title="Exportar dados do modelo">Exportar</button>
+        <button type="button" id="btn-app-send-revit" title="Enviar alterações para o Revit">Enviar ao Revit</button>
+      </div>
+      <div id="app-history-actions"><button id="btn-undo" title="Desfazer (Ctrl+Z)" disabled>↶</button><button id="btn-redo" title="Refazer (Ctrl+Shift+Z)" disabled>↷</button></div>
+      <div id="processing-indicator" aria-live="polite"><span></span><b>Processando</b></div>
+      <div class="app-utility-actions">
+        <button type="button" id="btn-app-settings" title="Configurações">⚙</button>
+        <button type="button" id="btn-app-help" title="Ajuda e atalhos (F1)">?</button>
+        <button type="button" id="btn-app-fullscreen" title="Tela cheia">□</button>
+      </div>
+    </header>
     <div id="top-toolbar">
-      <div class="toolbar-brand"><span class="toolbar-brand-mark">M</span><span class="toolbar-brand-copy"><b>Editor de Modulação</b><small>alvenaria estrutural</small></span></div>
-      <div class="toolbar-separator"></div>
-      <div class="toolbar-group">
+      <div class="toolbar-cluster" data-cluster-label="Edição">
         <button id="btn-project-panel" title="Projeto e configurações">Projeto</button>
         <button data-editor-tool="select" class="active" title="Selecionar (Esc)">Selecionar</button>
         <button data-editor-tool="move" title="Mover elemento selecionado">Mover</button>
@@ -200,25 +261,21 @@
         <button data-editor-tool="measure" title="Medir entre dois pontos">Medir</button>
         <button data-editor-tool="section" title="Configurar plano de corte">Corte</button>
       </div>
-      <div class="toolbar-separator"></div>
-      <div class="toolbar-group">
+      <div class="toolbar-cluster" data-cluster-label="Análise">
         <button id="btn-wall-mode" title="Inspeção parede por parede">Vista por parede</button>
         <button id="btn-isolate-selected" title="Isolar elemento ou parede">Isolar</button>
         <button id="btn-hide-selected" title="Ocultar elemento selecionado">Ocultar</button>
         <button id="btn-show-all" title="Restaurar toda a visibilidade">Mostrar tudo</button>
         <button id="btn-diagnostic-mode" title="Alternar diagnóstico visual">Diagnóstico</button>
       </div>
-      <div class="toolbar-separator"></div>
-    <div id="view-toolbar">
+    <div id="view-toolbar" class="toolbar-cluster" data-cluster-label="Visualização">
       <button class="view-btn" id="view-top">Topo</button>
       <button class="view-btn" id="view-front">Frente</button>
       <button class="view-btn" id="view-side">Lateral</button>
       <button class="view-btn" id="view-iso">Isométrica</button>
       <button class="view-btn" id="view-extents">Zoom Extents</button>
     </div>
-    <div id="editor-toolbar">
-      <button id="btn-undo" title="Desfazer (Ctrl+Z)" disabled>↶</button>
-      <button id="btn-redo" title="Refazer (Ctrl+Y)" disabled>↷</button>
+    <div id="editor-toolbar" class="toolbar-cluster" data-cluster-label="Vista e ação">
       <button id="view-selected" title="Zoom Selected">Focar seleção</button>
       <button id="view-reset" title="Restaurar vista isométrica">Reset</button>
       <button id="btn-cancel-action" title="Cancelar operação atual (Esc)" disabled>Cancelar</button>
@@ -234,6 +291,23 @@
       <button data-nav-action="extents" title="Enquadrar modelo">Enquadrar modelo</button>
       <button data-nav-action="selection" title="Enquadrar seleção">Enquadrar seleção</button>
       <button data-nav-action="home" title="Vista inicial">Vista inicial</button>
+    </div>
+    <div id="visibility-popover" class="editor-popover" aria-label="Visibilidade do modelo">
+      <div class="popover-title"><strong>Visibilidade</strong><button type="button" data-close-popover="visibility-popover">×</button></div>
+      <label>Modo visual<select id="quick-display-mode"><option value="realistic">Realista</option><option value="structural">Estrutural</option><option value="blocks">Blocos</option><option value="walls">Paredes</option><option value="xray">Raio-X</option><option value="wireframe">Wireframe</option><option value="diagnostic">Diagnóstico</option><option value="openings">Aberturas</option><option value="wall-view">Vista por parede</option></select></label>
+      <div class="visibility-grid">
+        <button type="button" data-visibility-toggle="mode-plan">Planta</button><button type="button" data-visibility-toggle="mode-walls">Paredes</button>
+        <button type="button" data-visibility-toggle="mode-blocks">Blocos</button><button type="button" data-visibility-toggle="mode-openings">Aberturas</button>
+        <button type="button" data-visibility-toggle="mode-axes">Eixos</button><button type="button" data-visibility-toggle="mode-errors">Erros</button>
+      </div>
+      <button type="button" id="btn-visibility-details" class="secondary">Configurações avançadas</button>
+    </div>
+    <div id="more-tools-popover" class="editor-popover" aria-label="Mais ferramentas">
+      <div class="popover-title"><strong>Mais ferramentas</strong><button type="button" data-close-popover="more-tools-popover">×</button></div>
+      <button type="button" data-more-action="calculator">Calculadora de modulação</button>
+      <button type="button" data-more-action="history">Histórico de edições</button>
+      <button type="button" data-more-action="diagnostics">Diagnóstico técnico</button>
+      <button type="button" data-more-action="commands">Paleta de comandos</button>
     </div>
     <div id="selection-panel"></div>
     <div id="opening-context-menu">
@@ -287,14 +361,21 @@
     <div id="section-panel" class="editor-floating-panel">
       <div class="panel-titlebar"><strong>Plano de corte</strong><span class="panel-window-controls"><button type="button" data-panel-minimize="section-panel">—</button><button type="button" data-panel-dock="section-panel">⇥</button><button type="button" data-panel-close="section-panel">×</button></span></div>
       <label class="checkbox-row"><input type="checkbox" id="section-live-enabled"> Corte ativo em tempo real</label>
+      <div class="panel-hint">Arraste o plano ou a seta diretamente no modelo. Segure Shift para ignorar o snap.</div>
       <select id="section-live-axis"><option value="z">Horizontal (Z)</option><option value="x">Vertical (X)</option><option value="y">Vertical (Y)</option><option value="wall">Ao longo da parede atual</option></select>
       <input type="range" id="section-live-slider" min="-1000" max="1000" step="1" value="150">
       <label>Posição (m)<input type="number" id="section-live-position" step="0.01" value="1.50"></label>
-      <div class="property-actions"><button type="button" id="section-through-selection">Pela seleção</button><button type="button" id="section-disable" class="secondary">Desativar</button></div>
+      <div class="property-actions"><button type="button" id="section-through-selection">Pela seleção</button><button type="button" id="section-invert" class="secondary">Inverter lado</button><button type="button" id="section-disable" class="secondary">Desativar</button></div>
     </div>
-    <div id="diagnostics-panel" class="editor-floating-panel">
-      <div class="panel-titlebar"><strong>Diagnóstico técnico</strong><span class="panel-window-controls"><button type="button" data-panel-minimize="diagnostics-panel">—</button><button type="button" data-panel-dock="diagnostics-panel">⇥</button><button type="button" data-panel-close="diagnostics-panel">×</button></span></div>
-      <div id="diagnostics-content">Selecione uma parede, abertura ou bloco para inspecionar.</div>
+    <div id="diagnostics-panel" class="editor-floating-panel diagnostic-dock">
+      <div class="panel-titlebar"><strong>Diagnóstico do modelo</strong><span class="panel-window-controls"><button type="button" data-panel-minimize="diagnostics-panel">—</button><button type="button" data-panel-close="diagnostics-panel">×</button></span></div>
+      <div class="diagnostic-tabs" role="tablist"><button type="button" class="active" data-diagnostic-tab="problems">Problemas</button><button type="button" data-diagnostic-tab="element">Diagnóstico</button><button type="button" data-diagnostic-tab="history">Histórico</button><button type="button" data-diagnostic-tab="log">Log</button><button type="button" data-diagnostic-tab="dependencies">Dependências</button><button type="button" data-diagnostic-tab="commands">Comandos</button></div>
+      <div class="diagnostic-tab-content active" data-diagnostic-content="problems"><div class="diagnostic-filters"><select id="diagnostic-filter-severity"><option value="">Toda gravidade</option><option value="error">Erros</option><option value="warning">Alertas</option></select><select id="diagnostic-filter-wall"><option value="">Todas as paredes</option></select><input type="search" id="diagnostic-filter-text" placeholder="Filtrar problemas…"></div><div id="diagnostics-conflicts">Nenhum conflito analisado.</div></div>
+      <div class="diagnostic-tab-content" data-diagnostic-content="element"><div id="diagnostics-content">Selecione uma parede, abertura ou bloco para inspecionar.</div></div>
+      <div class="diagnostic-tab-content" data-diagnostic-content="history"><div id="diagnostics-history">Nenhuma edição nesta sessão.</div></div>
+      <div class="diagnostic-tab-content" data-diagnostic-content="log"><div id="diagnostics-log">Aplicação iniciada. Aguardando modelo.</div></div>
+      <div class="diagnostic-tab-content" data-diagnostic-content="dependencies"><div id="diagnostics-dependencies">Selecione um elemento para ver suas dependências.</div></div>
+      <div class="diagnostic-tab-content" data-diagnostic-content="commands"><div id="diagnostics-commands">Duplo clique: enquadrar · Ctrl+clique: seleção múltipla · Esc: cancelar · Shift durante arraste: ignorar snap</div></div>
     </div>
     <div id="view-cube" aria-label="ViewCube">
       <button id="cube-top" data-view="top">TOP</button><button id="cube-bottom" data-view="bottom">BOT</button>
@@ -303,31 +384,38 @@
       <button id="cube-iso" data-view="iso" title="Vista isométrica">ISO</button>
       <button id="cube-home" title="Vista inicial">⌂</button>
     </div>
-    <div id="legend">
-      <div><span style="background:#4caf50"></span>fecha em blocos</div>
-      <div><span style="background:#e53935"></span>não fecha / face única</div>
-      <div><span style="background:#5588cc"></span>planta DXF (referência)</div>
+    <div id="axis-indicator" aria-label="Orientação dos eixos"><i class="axis-x">X</i><i class="axis-y">Y</i><i class="axis-z">Z</i></div>
+    <div id="legend" aria-label="Legenda de estados">
+      <div><span style="background:#22c55e"></span><b>✓</b> Válida</div>
+      <div><span style="background:#ef4444"></span><b>!</b> Erro</div>
+      <div><span style="background:#f59e0b"></span><b>△</b> Alerta</div>
+      <div><span style="background:#3b82f6"></span><b>□</b> Seleção</div>
+      <div><span style="background:#8a909a"></span><b>·</b> Referência</div>
     </div>
-    <div id="nav-hint">Esquerdo: selecionar · Scroll: zoom · Meio: pan · Shift+Meio: orbit</div>
+    <div id="nav-hint">Esquerdo: selecionar/arrastar · Shift: movimento livre · Scroll: zoom · Meio: pan · Shift+Meio: orbit</div>
     <div id="hover-tooltip"></div>
     <div id="quick-edit-bar"><strong id="quick-edit-title">Elemento</strong><button data-quick-shift="-1">← 10mm</button><span id="quick-edit-size">—</span><button data-quick-shift="1">10mm →</button><button data-quick-properties>•••</button></div>
+    <div id="drag-value-badge" role="status" aria-live="polite"></div>
     <div id="toast-stack" aria-live="polite"></div>
     <div id="element-search" class="command-overlay"><div class="command-box"><input id="element-search-input" type="text" placeholder="Pesquisar parede, abertura ou bloco…"><div id="element-search-results"></div></div></div>
     <div id="command-palette" class="command-overlay"><div class="command-box"><input id="command-input" type="text" placeholder="> Digite um comando…"><div id="command-results"></div></div></div>
     <div id="selection-breadcrumb">Projeto</div>
     <div id="status-bar">
       <span id="status-message" class="status-cell">Pronto</span>
-      <span id="status-selected" class="legacy-status">Nada selecionado</span><span id="status-kind" class="legacy-status">Tipo: —</span><span id="status-wall" class="legacy-status">Parede: —</span><span id="status-metrics" class="legacy-status">Dimensões: —</span><span id="status-modulation" class="legacy-status">Modulação: —</span><span id="status-alerts" class="legacy-status">Alertas: 0</span><span id="status-course" class="legacy-status">Fiada: Todas</span><span id="status-snap" class="legacy-status">Snap: 1 cm</span><span id="status-scale" class="legacy-status">Movimento: 1 cm</span>
+      <span id="status-selected" class="status-cell status-secondary">Nada selecionado</span><span id="status-kind" class="legacy-status">Tipo: —</span><span id="status-wall" class="legacy-status">Parede: —</span><span id="status-metrics" class="legacy-status">Dimensões: —</span><span id="status-modulation" class="legacy-status">Modulação: —</span><span id="status-alerts" class="status-cell status-secondary">Alertas: 0</span><span id="status-course" class="status-cell status-secondary">Fiada: Todas</span><span id="status-snap" class="status-cell status-secondary">Snap: 10mm</span><span id="status-scale" class="legacy-status">Movimento: 1 cm</span><span id="status-unit" class="status-cell status-secondary">Unidade: cm</span><span id="status-revit" class="status-cell status-secondary">Revit: aguardando</span>
       <span class="footer-spacer"></span>
       <button id="projection-mode" title="Alternar perspectiva/ortográfica">Perspectiva</button>
+      <button id="btn-visibility-popover" title="Visibilidade do modelo (V)">Visibilidade</button>
       <select id="toolbar-display-mode" title="Modo visual"><option value="realistic">Realista</option><option value="structural">Estrutural</option><option value="blocks">Blocos</option><option value="walls">Paredes</option><option value="xray">Raio-X</option><option value="wireframe">Wireframe</option><option value="diagnostic">Diagnóstico</option><option value="openings">Aberturas</option><option value="wall-view">Vista por parede</option></select>
       <button id="toggle-shadows" title="Alternar sombras">Sombras</button>
       <button id="footer-section" title="Plano de corte">Corte</button>
+      <button id="btn-more-tools" title="Mais ferramentas">Mais</button>
       <button id="btn-realtime" class="active" title="Modulação em tempo real">Tempo real</button>
-      <select id="snap-step" title="Precisão do snap"><option value="0.1">Snap 1mm</option><option value="0.5">Snap 5mm</option><option value="1" selected>Snap 10mm</option><option value="5">Snap 50mm</option><option value="0">Snap off</option></select>
+      <select id="snap-step" title="Precisão do snap"><option value="0.1">Snap 1mm</option><option value="0.5">Snap 5mm</option><option value="1" selected>Snap 10mm</option><option value="2">Snap 20mm</option><option value="project">Snap módulo</option><option value="0">Snap off</option></select>
       <button id="course-previous" title="Fiada anterior">‹</button><select id="toolbar-course-filter" title="Fiada visível"><option value="">Fiada: Todas</option></select><button id="course-next" title="Próxima fiada">›</button>
       <span id="status-coordinates" class="status-cell">X 0,00 · Y 0,00 · Z 0,00 m</span>
     </div>
+    <div id="help-overlay" class="command-overlay"><div class="command-box help-box"><div class="help-header"><strong>Ajuda rápida e atalhos</strong><button type="button" data-close-overlay="help-overlay">×</button></div><div class="shortcut-grid"><kbd>S</kbd><span>Selecionar</span><kbd>O</kbd><span>Orbitar</span><kbd>P</kbd><span>Pan</span><kbd>Z</kbd><span>Zoom</span><kbd>F</kbd><span>Enquadrar seleção</span><kbd>M</kbd><span>Mover</span><kbd>R</kbd><span>Girar</span><kbd>C</kbd><span>Plano de corte</span><kbd>I</kbd><span>Isolar seleção</span><kbd>H</kbd><span>Ocultar seleção</span><kbd>Esc</kbd><span>Cancelar ação</span><kbd>Shift</kbd><span>Ignorar snap durante o arraste</span></div></div></div>
   </div>
 </div>
 
@@ -394,6 +482,7 @@ let activePreviewAction = null;
 let lastBounds = null;
 let editSession = null;
 let editPreviewTimer = null;
+let editPreviewAbortController = null;
 let modelRevision = 0;
 let requestRevision = 0;
 let activeCourseIndex = null;
@@ -767,12 +856,15 @@ function frameCamera(walls, entities) {
     minY = Math.min(minY, y); maxY = Math.max(maxY, y);
   });
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const span = Math.max(maxX - minX, maxY - minY, 200);
   const maxHeight = Math.max(...(walls || []).map(w => (w.base_z_cm || 0) + (w.height_cm || WALL_HEIGHT_CM)), WALL_HEIGHT_CM);
+  // Inclui a altura no enquadramento: em modelos compactos e altos, usar
+  // apenas a extensão em planta deixa a câmera dentro da alvenaria.
+  const span = Math.max(maxX - minX, maxY - minY, maxHeight, 200);
   lastBounds = { cx, cy, cz: maxHeight / 2, span };
   controls.target.set(cx, cy, maxHeight / 2);
-  camera.position.set(cx, cy - span * 1.2, span * 1.1);
+  camera.position.set(cx - span * 1.35, cy - span * 1.35, maxHeight / 2 + span * 1.25);
   camera.up.set(0, 0, 1);
+  camera.lookAt(controls.target);
   controls.update();
 }
 
@@ -797,7 +889,7 @@ function setView(kind) {
   } else if (kind === 'bottom') {
     camera.position.set(b.cx, b.cy + span * 0.001, b.cz - span * 1.6);
   } else if (kind === 'iso') {
-    camera.position.set(b.cx - span * 1.1, b.cy - span * 1.1, b.cz + span * 1.1);
+    camera.position.set(b.cx - span * 1.35, b.cy - span * 1.35, b.cz + span * 1.25);
   }
   camera.up.set(0, 0, 1);
   camera.lookAt(controls.target);
@@ -871,6 +963,8 @@ function updateCourseFilter() {
 
 function updateHistory(history) {
   const state = history || {};
+  window.editorBackendCanUndo = Boolean(state.can_undo);
+  window.editorBackendCanRedo = Boolean(state.can_redo);
   document.getElementById('btn-undo').disabled = !state.can_undo;
   document.getElementById('btn-redo').disabled = !state.can_redo;
   const entries = state.entries || [];
@@ -928,6 +1022,11 @@ function selectObject(obj, instanceId = null) {
     const w = obj.userData.wall;
     const mod = w.modulation || {};
     const solverStatus = w.modulation_status || {};
+    const identities = wallIdentitySet(w);
+    const wallBlocks = currentBlockCandidates.filter(candidate => setsIntersect(candidateIdentitySet(candidate), identities));
+    const wallOpenings = currentOpenings.filter(opening => setsIntersect(openingIdentitySet(opening), identities));
+    const courseCount = new Set(wallBlocks.map(block => Number(block.course_index))).size;
+    const orientation = Math.atan2(w.end[1] - w.start[1], w.end[0] - w.start[0]) * 180 / Math.PI;
     selectedWallId = String(w.id || '');
     panel.innerHTML = `<div class="sel-title">Parede ${w.id}</div>`
       + `<div class="sel-row">Layer: ${w.layer}</div>`
@@ -935,7 +1034,10 @@ function selectObject(obj, instanceId = null) {
       + `<div class="sel-row">Altura: ${(w.height_cm || 0).toFixed(1)}cm · Largura: ${w.thickness_cm.toFixed(1)}cm</div>`
       + `<div class="sel-row">Nível de base: ${w.level || '-'}</div>`
       + `<div class="sel-row">Elevação: ${(w.base_z_cm || 0).toFixed(1)}cm · Offset: ${(w.base_offset_cm || 0).toFixed(1)}cm</div>`
+      + `<div class="sel-row">Orientação: ${orientation.toFixed(1)}° · Fiadas: ${courseCount || '-'}</div>`
       + `<div class="sel-row">Junções: ${(w.junctions || []).map(j => j || '-').join(' / ')}</div>`
+      + `<div class="sel-row">Amarração: ${w.left_tie || (w.junctions || [])[0] || 'livre'} / ${w.right_tie || (w.junctions || [])[1] || 'livre'}</div>`
+      + `<div class="sel-row">Blocos: ${wallBlocks.length} · Aberturas: ${wallOpenings.length}</div>`
       + `<div class="sel-row">Modulação: ${mod.closes ? 'fecha' : 'não fecha'}`
       + `${mod.blocks ? ' (' + mod.blocks.join('+') + 'cm)' : ''}</div>`
       + (solverStatus.reason ? `<div class="sel-row">Diagnóstico: ${solverStatus.reason}</div>` : '')
@@ -951,6 +1053,10 @@ function selectObject(obj, instanceId = null) {
       + `<div class="sel-row">Base: ${(op.sill_cm || 0).toFixed(1)}cm · Verga: ${(op.head_cm || 0).toFixed(1)}cm</div>`
       + `<div class="sel-row">Nível: ${op.level || '-'}</div>`
       + `<div class="sel-row">Parede associada: ${op.wall_group_id || op.host_wall_id || op.wall_id || '-'}</div>`
+      + `<div class="sel-row">Posição: ${Number((op.center_cm || [0, 0])[0]).toFixed(1)}, ${Number((op.center_cm || [0, 0])[1]).toFixed(1)}cm</div>`
+      + `<div class="sel-row">Verga: ${Number(op.lintel_cm || op.head_cm || 0).toFixed(1)}cm · Contraverga: ${Number(op.counter_lintel_cm || op.sill_cm || 0).toFixed(1)}cm</div>`
+      + `<div class="sel-row">Folgas laterais: ${Number(op.left_clearance_cm || 0).toFixed(1)} / ${Number(op.right_clearance_cm || 0).toFixed(1)}cm</div>`
+      + `<div class="sel-row">Alertas: ${(op.warnings || op.alerts || []).length || 'nenhum'}</div>`
       + `<div class="sel-row" style="margin-top:8px">`
       + `<button type="button" data-opening-shift="-1" class="secondary">Mover -1cm</button> `
       + `<button type="button" data-opening-shift="1" class="secondary">Mover +1cm</button>`
@@ -960,12 +1066,16 @@ function selectObject(obj, instanceId = null) {
   } else if (obj.userData.kind === 'block-instances') {
     const entry = obj.userData.instances[instanceId];
     const block = entry.candidate;
+    const blockRotation = Math.atan2((block.x_dir || [1, 0])[1], (block.x_dir || [1, 0])[0]) * 180 / Math.PI;
     panel.innerHTML = `<div class="sel-title">${block.type_name || ('Bloco ' + block.logical_code)}</div>`
       + `<div class="sel-row">Código: ${block.logical_code}</div>`
       + `<div class="sel-row">Dimensões: ${block.length_cm.toFixed(1)} × ${block.width_cm.toFixed(1)} × ${block.height_cm.toFixed(1)}cm</div>`
       + `<div class="sel-row">Posição: ${block.origin_cm[0].toFixed(1)}, ${block.origin_cm[1].toFixed(1)}, ${block.z_cm.toFixed(1)}cm</div>`
       + `<div class="sel-row">Nível: ${block.level || '-'} · Fiada ${block.course_index + 1} (${block.course})</div>`
       + `<div class="sel-row">Parede: ${block.wall_id || 'encontro'} · ${block.placement_reason || 'preenchimento'}</div>`;
+    panel.innerHTML += `<div class="sel-row">Rotação: ${blockRotation.toFixed(1)}° · Amarração: ${block.tie_status || block.placement_reason || 'conforme solver'}</div>`
+      + `<div class="sel-row">Prisma: ${block.prism_status || (block.is_error ? 'revisar' : 'válido')} · Conectados: ${(block.source_wall_ids || block.primary_source_wall_ids || []).length}</div>`
+      + `<div class="sel-row">Substituições: ${(block.allowed_substitutions || []).join(', ') || 'definidas pelo catálogo e pelo solver'}</div>`;
   } else if (obj.userData.kind === 'entity') {
     const e = obj.userData.entity;
     const dx = e.end[0] - e.start[0], dy = e.end[1] - e.start[1];
@@ -1011,14 +1121,24 @@ function pickObjectAt(clientX, clientY) {
   return null;
 }
 
-function worldPointAt(clientX, clientY) {
+function editorSnapStep() {
+  const value = Number(window.editorSnapCm || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function snapScalar(value, freeMovement = false) {
+  const snap = freeMovement ? 0 : editorSnapStep();
+  return snap > 0 ? Math.round(value / snap) * snap : value;
+}
+
+function worldPointAt(clientX, clientY, freeMovement = false) {
   const rect = canvasEl.getBoundingClientRect();
   mouseNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   mouseNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(mouseNdc, camera);
   const point = new THREE.Vector3();
   if (!raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), point)) return null;
-  const snap = Number(window.editorSnapCm || 0);
+  const snap = freeMovement ? 0 : editorSnapStep();
   if (snap > 0) {
     point.x = Math.round(point.x / snap) * snap;
     point.y = Math.round(point.y / snap) * snap;
@@ -1027,18 +1147,44 @@ function worldPointAt(clientX, clientY) {
   return point;
 }
 
+function worldPointAlongAxis(clientX, clientY, origin, direction, freeMovement = false) {
+  const rect = canvasEl.getBoundingClientRect();
+  mouseNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  mouseNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouseNdc, camera);
+  const axis = direction.clone().normalize();
+  const rayDirection = raycaster.ray.direction.clone().normalize();
+  const between = origin.clone().sub(raycaster.ray.origin);
+  const dot = axis.dot(rayDirection);
+  const denominator = 1 - dot * dot;
+  let distance;
+  if (Math.abs(denominator) < 1e-5) {
+    const projected = origin.clone().project(camera);
+    const pixelsPerWorld = Math.max(0.001, rect.height / Math.max(100, camera.position.distanceTo(origin)));
+    distance = -(clientY - (rect.top + (-projected.y * 0.5 + 0.5) * rect.height)) / pixelsPerWorld;
+  } else {
+    distance = (dot * rayDirection.dot(between) - axis.dot(between)) / denominator;
+  }
+  distance = snapScalar(distance, freeMovement);
+  return origin.clone().add(axis.multiplyScalar(distance));
+}
+
 function beginWallEdit(mode) {
   const wall = currentWalls.find(item => String(item.id || '') === selectedWallId);
   if (!wall || !currentModelId) return;
-  editSession = { kind: 'wall', mode, wall, pointerStart: null, baseRevision: modelRevision };
+  editSession = { kind: 'wall', mode: mode || 'move', wall, pointerStart: null,
+    baseRevision: modelRevision, moved: false, direct: false };
   setStatus(`Arraste no modelo para ${mode === 'move' ? 'mover a parede' : (mode === 'start' ? 'reposicionar o início' : 'reposicionar o fim')}. A prévia usa o solver e a validação final ocorre ao soltar.`);
 }
 
-function beginOpeningEdit() {
+function beginOpeningEdit(mode = 'move') {
   const opening = currentOpenings.find(item => String(item.element_id || '') === selectedOpeningId);
   if (!opening || !currentModelId) return;
-  editSession = { kind: 'opening', opening, pointerStart: null, baseRevision: modelRevision };
-  setStatus('Arraste no modelo para mover a abertura ao longo da parede. A prévia usa o solver e a validação final ocorre ao soltar.');
+  editSession = { kind: 'opening', mode, opening, pointerStart: null,
+    baseRevision: modelRevision, moved: false, direct: false };
+  setStatus(mode === 'move'
+    ? 'Arraste a abertura diretamente ao longo da parede. A prévia usa o solver e a validação final ocorre ao soltar.'
+    : 'Arraste o handle lateral para alterar a largura. Segure Shift para movimento livre.');
 }
 
 async function resizeSelectedOpening() {
@@ -1067,83 +1213,131 @@ async function resizeSelectedOpening() {
   }
 }
 
-async function commitInteractiveEdit(session, point) {
-  if (!currentModelId || !point) return;
-  let endpoint;
-  let body;
+function interactiveEditAt(session, point, freeMovement = false) {
+  if (!session || !session.pointerStart || !point) return null;
   if (session.kind === 'wall') {
-    const [x0, y0] = session.wall.start;
-    const [x1, y1] = session.wall.end;
-    const dx = point.x - session.pointerStart.x;
-    const dy = point.y - session.pointerStart.y;
-    const start = session.mode === 'move' ? [x0 + dx, y0 + dy] : (session.mode === 'start' ? [point.x, point.y] : [x0, y0]);
-    const end = session.mode === 'move' ? [x1 + dx, y1 + dy] : (session.mode === 'end' ? [point.x, point.y] : [x1, y1]);
-    endpoint = '/api/edit-wall';
-    body = { model_id: currentModelId, wall_id: session.wall.id, start_cm: start, end_cm: end,
-      base_revision: session.baseRevision, revision: ++requestRevision };
-  } else {
-    const opening = session.opening;
-    const axis = opening.axis_cm || [Math.cos(opening.angle_rad || 0), Math.sin(opening.angle_rad || 0)];
-    const delta = (point.x - session.pointerStart.x) * axis[0] + (point.y - session.pointerStart.y) * axis[1];
-    endpoint = '/api/move-opening';
-    body = {
-      model_id: currentModelId,
-      opening_id: opening.element_id,
-      center_cm: [opening.center_cm[0] + axis[0] * delta, opening.center_cm[1] + axis[1] * delta],
-      base_revision: session.baseRevision, revision: ++requestRevision,
+    const wall = session.wall;
+    const [x0, y0] = wall.start;
+    const [x1, y1] = wall.end;
+    const length = Math.max(1e-6, Math.hypot(x1 - x0, y1 - y0));
+    const axis = [(x1 - x0) / length, (y1 - y0) / length];
+    let start;
+    let end;
+    let delta;
+    if (session.mode === 'move') {
+      const dx = snapScalar(point.x - session.pointerStart.x, freeMovement);
+      const dy = snapScalar(point.y - session.pointerStart.y, freeMovement);
+      start = [x0 + dx, y0 + dy];
+      end = [x1 + dx, y1 + dy];
+      delta = Math.hypot(dx, dy);
+    } else {
+      const raw = (point.x - session.pointerStart.x) * axis[0]
+        + (point.y - session.pointerStart.y) * axis[1];
+      delta = snapScalar(raw, freeMovement);
+      start = session.mode === 'start' ? [x0 + axis[0] * delta, y0 + axis[1] * delta] : [x0, y0];
+      end = session.mode === 'end' ? [x1 + axis[0] * delta, y1 + axis[1] * delta] : [x1, y1];
+    }
+    const newLength = Math.hypot(end[0] - start[0], end[1] - start[1]);
+    return {
+      endpoint: '/api/edit-wall',
+      body: { wall_id: wall.id, start_cm: start, end_cm: end },
+      label: session.mode === 'move' ? `Parede · Δ ${(delta / 100).toFixed(2)} m`
+        : `Comprimento ${(newLength / 100).toFixed(2)} m`,
+      deltaCm: delta,
     };
   }
+
+  const opening = session.opening;
+  const sourceAxis = opening.axis_cm || [Math.cos(opening.angle_rad || 0), Math.sin(opening.angle_rad || 0)];
+  const axisLength = Math.max(1e-6, Math.hypot(sourceAxis[0], sourceAxis[1]));
+  const axis = [sourceAxis[0] / axisLength, sourceAxis[1] / axisLength];
+  if (session.mode === 'sill') {
+    const delta = snapScalar(point.z - session.pointerStart.z, freeMovement);
+    const sill = Math.max(0, Number(opening.sill_cm || 0) + delta);
+    return {
+      endpoint: '/api/edit-opening', body: { opening_id: opening.element_id, sill_cm: sill },
+      label: `Peitoril ${(sill / 100).toFixed(2)} m`, deltaCm: delta,
+    };
+  }
+  const rawDelta = (point.x - session.pointerStart.x) * axis[0]
+    + (point.y - session.pointerStart.y) * axis[1];
+  const delta = snapScalar(rawDelta, freeMovement);
+  if (session.mode === 'resize-start' || session.mode === 'resize-end') {
+    const widthDelta = session.mode === 'resize-start' ? -delta : delta;
+    const width = Math.max(10, Number(opening.width_cm || 80) + widthDelta);
+    const centerDelta = session.mode === 'resize-start'
+      ? (Number(opening.width_cm || 80) - width) / 2
+      : (width - Number(opening.width_cm || 80)) / 2;
+    const center = [opening.center_cm[0] + axis[0] * centerDelta,
+      opening.center_cm[1] + axis[1] * centerDelta];
+    return {
+      endpoint: '/api/edit-opening',
+      body: { opening_id: opening.element_id, center_cm: center, width_cm: width },
+      label: `Largura ${(width / 100).toFixed(2)} m`, deltaCm: widthDelta,
+    };
+  }
+  const center = [opening.center_cm[0] + axis[0] * delta, opening.center_cm[1] + axis[1] * delta];
+  return {
+    endpoint: '/api/move-opening', body: { opening_id: opening.element_id, center_cm: center },
+    label: `Abertura ${delta >= 0 ? '+' : ''}${(delta / 100).toFixed(2)} m`, deltaCm: delta,
+  };
+}
+
+function restoreEditedSelection(session) {
+  let mesh = null;
+  if (session.kind === 'wall') {
+    mesh = wallGroup.children.find(item => item.userData.kind === 'wall'
+      && String(item.userData.wall.id || '') === String(session.wall.id || ''));
+  } else {
+    mesh = openingsGroup.children.find(item => item.userData.kind === 'opening'
+      && String(item.userData.opening.element_id || '') === String(session.opening.element_id || ''));
+  }
+  if (mesh) selectObject(mesh);
+}
+
+async function commitInteractiveEdit(session, computed) {
+  if (!currentModelId || !computed) return;
+  if (editPreviewAbortController) editPreviewAbortController.abort();
+  const body = Object.assign({ model_id: currentModelId, base_revision: session.baseRevision,
+    revision: ++requestRevision }, computed.body);
   setStatus('Recalculando paredes, encontros e blocos afetados...');
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetch(computed.endpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
     const data = await response.json();
     if (!response.ok) {
       setStatus((data.edit && data.edit.reason) || data.error || 'A edição foi rejeitada.', true);
+      if (committedViewData) renderModulationData(committedViewData);
       return;
     }
     renderModulationData(data, { edit: data.edit });
+    restoreEditedSelection(session);
     const edit = data.edit || {};
     const affected = (edit.affected_wall_ids || []).length;
     setStatus(`Atualização concluída${affected ? `: ${affected} parede(s) conectada(s) reavaliada(s).` : '.'}`);
   } catch (error) {
     setStatus('Falha ao atualizar a geometria: ' + error, true);
+    if (committedViewData) renderModulationData(committedViewData);
+  } finally {
+    if (window.editorEndDirectPreview) window.editorEndDirectPreview();
   }
 }
 
-function scheduleInteractivePreview(session, point) {
+function scheduleInteractivePreview(session, computed) {
   if (window.editorRealtimeEnabled === false) return;
   if (editPreviewTimer) window.clearTimeout(editPreviewTimer);
   editPreviewTimer = window.setTimeout(async () => {
-    if (editSession !== session || !currentModelId || !point) return;
+    if (editSession !== session || !currentModelId || !computed) return;
     const previewRevision = ++requestRevision;
-    let endpoint;
-    let body;
-    if (session.kind === 'wall') {
-      const [x0, y0] = session.wall.start;
-      const [x1, y1] = session.wall.end;
-      const dx = point.x - session.pointerStart.x;
-      const dy = point.y - session.pointerStart.y;
-      const start = session.mode === 'move' ? [x0 + dx, y0 + dy] : (session.mode === 'start' ? [point.x, point.y] : [x0, y0]);
-      const end = session.mode === 'move' ? [x1 + dx, y1 + dy] : (session.mode === 'end' ? [point.x, point.y] : [x1, y1]);
-      endpoint = '/api/edit-wall';
-      body = { model_id: currentModelId, wall_id: session.wall.id, start_cm: start, end_cm: end,
-        preview: true, base_revision: session.baseRevision, revision: previewRevision };
-    } else {
-      const opening = session.opening;
-      const axis = opening.axis_cm || [Math.cos(opening.angle_rad || 0), Math.sin(opening.angle_rad || 0)];
-      const delta = (point.x - session.pointerStart.x) * axis[0] + (point.y - session.pointerStart.y) * axis[1];
-      endpoint = '/api/move-opening';
-      body = {
-        model_id: currentModelId, opening_id: opening.element_id,
-        center_cm: [opening.center_cm[0] + axis[0] * delta, opening.center_cm[1] + axis[1] * delta],
-        preview: true, base_revision: session.baseRevision, revision: previewRevision,
-      };
-    }
+    if (editPreviewAbortController) editPreviewAbortController.abort();
+    editPreviewAbortController = new AbortController();
+    const body = Object.assign({ model_id: currentModelId, preview: true,
+      base_revision: session.baseRevision, revision: previewRevision }, computed.body);
     try {
-      const response = await fetch(endpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      const response = await fetch(computed.endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        signal: editPreviewAbortController.signal, body: JSON.stringify(body),
       });
       const data = await response.json();
       if (editSession !== session || Number(data.request_revision) !== previewRevision) return;
@@ -1155,50 +1349,118 @@ function scheduleInteractivePreview(session, point) {
       const affected = ((data.edit || {}).affected_wall_ids || []).length;
       setStatus(`Prévia calculada${affected ? `: ${affected} parede(s) conectada(s) reavaliada(s).` : '.'}`);
     } catch (error) {
-      if (editSession === session) setStatus('Falha ao calcular a prévia: ' + error, true);
+      if (error.name !== 'AbortError' && editSession === session) setStatus('Falha ao calcular a prévia: ' + error, true);
     }
-  }, 180);
+  }, 110);
 }
 
-canvasEl.addEventListener('pointerdown', event => {
-  if (!editSession || event.button !== 0) return;
-  const point = worldPointAt(event.clientX, event.clientY);
-  if (!point) return;
+function interactionPointForSession(session, event) {
+  if (session.kind === 'opening' && session.mode === 'sill') {
+    const opening = session.opening;
+    const origin = new THREE.Vector3(opening.center_cm[0], opening.center_cm[1], Number(opening.sill_cm || 0));
+    return worldPointAlongAxis(event.clientX, event.clientY, origin, new THREE.Vector3(0, 0, 1), event.shiftKey);
+  }
+  return worldPointAt(event.clientX, event.clientY, event.shiftKey);
+}
+
+function directEditSession(handle, hit) {
+  const kind = handle && handle.kind || hit && hit.object && hit.object.userData.kind;
+  if (kind !== 'wall' && kind !== 'opening') return null;
+  if (hit && (!selectedObject || selectedObject !== hit.object)) selectObject(hit.object, hit.instanceId);
+  if (kind === 'wall') {
+    const wallId = handle && handle.wallId || selectedWallId;
+    const wall = currentWalls.find(item => String(item.id || '') === String(wallId || ''));
+    return wall ? { kind: 'wall', mode: handle && handle.mode || 'move', wall,
+      pointerStart: null, baseRevision: modelRevision, moved: false, direct: true } : null;
+  }
+  const openingId = handle && handle.openingId || selectedOpeningId;
+  const opening = currentOpenings.find(item => String(item.element_id || '') === String(openingId || ''));
+  return opening ? { kind: 'opening', mode: handle && handle.mode || 'move', opening,
+    pointerStart: null, baseRevision: modelRevision, moved: false, direct: true } : null;
+}
+
+function startInteractivePointer(session, event) {
+  const point = interactionPointForSession(session, event);
+  if (!point) return false;
+  editSession = session;
+  session.pointerStart = point;
+  session.clientStart = [event.clientX, event.clientY];
+  session.pointerId = event.pointerId;
+  controls.enabled = false;
+  canvasEl.classList.add('direct-dragging');
+  canvasEl.setPointerCapture(event.pointerId);
   event.preventDefault();
   event.stopPropagation();
-  editSession.pointerStart = point;
-  controls.enabled = false;
-  canvasEl.setPointerCapture(event.pointerId);
+  return true;
+}
+
+function cancelInteractiveEdit(message = 'Edição cancelada.') {
+  if (!editSession) return;
+  editSession = null;
+  if (editPreviewTimer) window.clearTimeout(editPreviewTimer);
+  if (editPreviewAbortController) editPreviewAbortController.abort();
+  controls.enabled = true;
+  canvasEl.classList.remove('direct-dragging');
+  if (window.editorEndDirectPreview) window.editorEndDirectPreview();
+  if (committedViewData) renderModulationData(committedViewData);
+  setStatus(message);
+}
+window.cancelInteractiveEdit = cancelInteractiveEdit;
+
+canvasEl.addEventListener('pointerdown', event => {
+  if (event.button !== 0 || window.editorSectionDragging) return;
+  if (editSession && !editSession.pointerStart) {
+    startInteractivePointer(editSession, event);
+    return;
+  }
+  const activeTool = window.editorActiveTool || 'select';
+  const navigationTool = window.editorNavigationTool || 'select';
+  if (!currentModelId || !['select', 'move'].includes(activeTool) || navigationTool !== 'select') return;
+  const handle = window.editorPickDirectHandle && window.editorPickDirectHandle(event.clientX, event.clientY);
+  const hit = handle ? null : pickObjectAt(event.clientX, event.clientY);
+  const session = directEditSession(handle, hit);
+  if (session) startInteractivePointer(session, event);
 });
 
 canvasEl.addEventListener('pointermove', event => {
-  if (!editSession || !editSession.pointerStart) return;
-  const point = worldPointAt(event.clientX, event.clientY);
+  if (!editSession || !editSession.pointerStart || window.editorSectionDragging) return;
+  const point = interactionPointForSession(editSession, event);
   if (!point) return;
-  const distance = Math.hypot(point.x - editSession.pointerStart.x, point.y - editSession.pointerStart.y);
-  setStatus(`Prévia de edição: ${distance.toFixed(1)}cm. Recalculando a região afetada...`);
-  scheduleInteractivePreview(editSession, point);
+  const pixelDistance = Math.hypot(event.clientX - editSession.clientStart[0], event.clientY - editSession.clientStart[1]);
+  if (!editSession.moved && pixelDistance < 3) return;
+  editSession.moved = true;
+  const computed = interactiveEditAt(editSession, point, event.shiftKey);
+  if (!computed) return;
+  editSession.lastComputed = computed;
+  if (window.editorUpdateDirectPreview) window.editorUpdateDirectPreview(editSession, computed, event.clientX, event.clientY, event.shiftKey);
+  setStatus(`${computed.label} · ${event.shiftKey ? 'livre' : 'snap ativo'} · solver recalculando em segundo plano…`);
+  scheduleInteractivePreview(editSession, computed);
 });
 
-canvasEl.addEventListener('pointerup', event => {
+function finishInteractivePointer(event, cancelled = false) {
   if (!editSession || !editSession.pointerStart) return;
-  const point = worldPointAt(event.clientX, event.clientY);
   const session = editSession;
+  const point = interactionPointForSession(session, event);
+  const computed = point ? interactiveEditAt(session, point, event.shiftKey) : session.lastComputed;
   editSession = null;
   if (editPreviewTimer) window.clearTimeout(editPreviewTimer);
+  if (editPreviewAbortController) editPreviewAbortController.abort();
   controls.enabled = true;
+  canvasEl.classList.remove('direct-dragging');
   if (canvasEl.hasPointerCapture(event.pointerId)) canvasEl.releasePointerCapture(event.pointerId);
-  commitInteractiveEdit(session, point);
-});
+  if (cancelled || !session.moved || !computed || Math.abs(Number(computed.deltaCm || 0)) < 1e-6) {
+    if (window.editorEndDirectPreview) window.editorEndDirectPreview();
+    if (cancelled && committedViewData) renderModulationData(committedViewData);
+    return;
+  }
+  commitInteractiveEdit(session, computed);
+}
+
+canvasEl.addEventListener('pointerup', event => finishInteractivePointer(event));
+canvasEl.addEventListener('pointercancel', event => finishInteractivePointer(event, true));
 
 window.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && editSession) {
-    editSession = null;
-    if (editPreviewTimer) window.clearTimeout(editPreviewTimer);
-    controls.enabled = true;
-    if (committedViewData) renderModulationData(committedViewData);
-    setStatus('Edição cancelada.');
-  }
+  if (event.key === 'Escape' && editSession) cancelInteractiveEdit();
 });
 
 canvasEl.addEventListener('click', (e) => {

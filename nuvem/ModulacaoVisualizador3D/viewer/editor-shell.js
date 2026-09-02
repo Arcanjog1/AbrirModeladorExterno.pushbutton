@@ -24,6 +24,14 @@
     orthographicLike: false,
     shadows: false,
     activeEditorRequest: null,
+    sectionDrag: null,
+    sectionHover: null,
+    sectionUndo: [],
+    sectionRedo: [],
+    sectionInverted: false,
+    importStep: 1,
+    multiSelection: [],
+    additiveSelection: false,
   };
 
   window.editorRealtimeEnabled = true;
@@ -37,8 +45,10 @@
   const sectionVisualGroup = new THREE.Group();
   const previewFeedbackGroup = new THREE.Group();
   const diagnosticMarkersGroup = new THREE.Group();
+  const directManipulationPreviewGroup = new THREE.Group();
+  const multiSelectionGroup = new THREE.Group();
   [editorGizmoGroup, hoverOverlayGroup, courseLabelsGroup, sectionVisualGroup,
-    previewFeedbackGroup, diagnosticMarkersGroup].forEach(group => {
+    previewFeedbackGroup, diagnosticMarkersGroup, directManipulationPreviewGroup, multiSelectionGroup].forEach(group => {
     group.userData.editorOverlay = true;
     scene.add(group);
   });
@@ -165,6 +175,82 @@
     }
   }
 
+  function selectionKey(object, instanceId) {
+    return `${object && object.uuid || 'none'}:${instanceId == null ? '-' : instanceId}`;
+  }
+
+  function renderMultiSelection() {
+    clearThreeGroup(multiSelectionGroup);
+    if (state.multiSelection.length < 2) return;
+    state.multiSelection.forEach(item => {
+      const object = item.object;
+      if (!object || !object.parent) return;
+      if (object.isInstancedMesh && item.instanceId != null) {
+        const edges = new THREE.EdgesGeometry(object.geometry);
+        const outline = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x3b82f6, depthTest: false }));
+        const matrix = new THREE.Matrix4();
+        object.getMatrixAt(item.instanceId, matrix);
+        matrix.decompose(outline.position, outline.quaternion, outline.scale);
+        outline.renderOrder = 120;
+        multiSelectionGroup.add(outline);
+      } else {
+        const outline = new THREE.BoxHelper(object, 0x3b82f6);
+        outline.material.depthTest = false;
+        outline.renderOrder = 120;
+        multiSelectionGroup.add(outline);
+      }
+    });
+  }
+
+  function multiSelectionLabel(item) {
+    const data = item.object && item.object.userData || {};
+    if (data.kind === 'wall') return `Parede ${data.wall && data.wall.id || '—'}`;
+    if (data.kind === 'opening') return `Abertura ${data.opening && data.opening.element_id || '—'}`;
+    if (data.kind === 'block-instances') {
+      const entry = data.instances && data.instances[item.instanceId];
+      const block = entry && entry.candidate;
+      return block && (block.type_name || `Bloco ${block.logical_code}`) || 'Bloco';
+    }
+    return data.kind === 'entity' ? 'Entidade DXF' : 'Elemento';
+  }
+
+  function renderMultiSelectionPanel() {
+    if (state.multiSelection.length < 2) return;
+    const panel = byId('selection-panel');
+    panel.classList.remove('manual-hidden');
+    panel.innerHTML = `<div class="sel-title">${state.multiSelection.length} elementos selecionados</div>`
+      + '<div class="sel-row">Seleção múltipla · Ctrl+clique para adicionar ou remover.</div>'
+      + state.multiSelection.slice(0, 12).map(item => `<div class="sel-row multi-selection-row">${multiSelectionLabel(item)}</div>`).join('')
+      + (state.multiSelection.length > 12 ? `<div class="sel-row">+ ${state.multiSelection.length - 12} elemento(s)</div>` : '');
+    decorateSelectionPanel();
+    byId('selection-breadcrumb').textContent = `Projeto  ›  ${state.multiSelection.length} elementos`;
+    byId('status-selected').textContent = `${state.multiSelection.length} elementos selecionados`;
+  }
+
+  function handleSelectionChanged(detail) {
+    const object = detail && detail.object;
+    if (!object) {
+      window.setTimeout(() => {
+        if (!selectedObject && !state.additiveSelection) {
+          state.multiSelection = [];
+          clearThreeGroup(multiSelectionGroup);
+        }
+      }, 0);
+      return;
+    }
+    const item = { object, instanceId: detail.instanceId, key: selectionKey(object, detail.instanceId) };
+    if (state.additiveSelection) {
+      const index = state.multiSelection.findIndex(entry => entry.key === item.key);
+      if (index >= 0) state.multiSelection.splice(index, 1);
+      else state.multiSelection.push(item);
+    } else state.multiSelection = [item];
+    renderMultiSelection();
+    window.setTimeout(() => {
+      if (state.multiSelection.length > 1) renderMultiSelectionPanel();
+      requestRender();
+    }, 0);
+  }
+
   function setPanelOpen(panel, open) {
     if (!panel) return;
     if (panel.id === 'selection-panel') {
@@ -172,6 +258,82 @@
       return;
     }
     panel.classList.toggle('open', open);
+  }
+
+  function closePopovers(except) {
+    document.querySelectorAll('.editor-popover.open').forEach(popover => {
+      if (!except || popover.id !== except) popover.classList.remove('open');
+    });
+  }
+
+  function togglePopover(id) {
+    const popover = byId(id);
+    if (!popover) return;
+    const open = !popover.classList.contains('open');
+    closePopovers(id);
+    popover.classList.toggle('open', open);
+  }
+
+  function setImportStep(step) {
+    state.importStep = Math.max(1, Math.min(4, Number(step) || 1));
+    document.querySelectorAll('[data-import-step]').forEach(item => item.classList.toggle('active', Number(item.dataset.importStep) === state.importStep));
+    document.querySelectorAll('[data-import-progress]').forEach(item => {
+      const itemStep = Number(item.dataset.importProgress);
+      item.classList.toggle('active', itemStep === state.importStep);
+      item.classList.toggle('done', itemStep < state.importStep);
+    });
+    byId('btn-import-back').disabled = state.importStep === 1;
+    byId('btn-import-next').textContent = state.importStep === 4 ? 'Gerar modulação' : 'Continuar';
+  }
+
+  function openWorkspaceSection(name, options) {
+    const sectionName = name || 'import';
+    document.querySelectorAll('[data-workspace-tab]').forEach(tab => {
+      const active = tab.dataset.workspaceTab === sectionName;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-workspace-section]').forEach(section => section.classList.toggle('active', section.dataset.workspaceSection === sectionName));
+    setPanelOpen(byId('sidebar'), true);
+    if (sectionName === 'import' && options && options.step) setImportStep(options.step);
+  }
+
+  function appendDiagnosticLog(message) {
+    const log = byId('diagnostics-log');
+    if (!log || !message) return;
+    const stamp = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const lines = log.textContent === 'Aplicação iniciada. Aguardando modelo.' ? [] : log.textContent.split('\n');
+    lines.push(`[${stamp}] ${message}`);
+    log.textContent = lines.slice(-80).join('\n');
+  }
+
+  function currentExportPayload() {
+    return {
+      schema: 'modulador-externo-3d/v1',
+      exported_at: new Date().toISOString(),
+      project_path: byId('dxf-path').value.trim(),
+      model_id: typeof currentModelId === 'undefined' ? null : currentModelId,
+      revision: typeof modelRevision === 'undefined' ? null : modelRevision,
+      view_data: typeof committedViewData === 'undefined' ? null : committedViewData,
+    };
+  }
+
+  function downloadExport(payload, suffix) {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const project = (byId('project-name').textContent || 'modelo').replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-');
+    link.href = url; link.download = `${project}-${suffix || 'modulacao'}.json`; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function syncVisibilityPopover() {
+    byId('quick-display-mode').value = byId('display-mode').value;
+    document.querySelectorAll('[data-visibility-toggle]').forEach(button => {
+      const source = byId(button.dataset.visibilityToggle);
+      button.classList.toggle('active', Boolean(source && source.checked));
+      button.setAttribute('aria-pressed', source && source.checked ? 'true' : 'false');
+    });
   }
 
   function showToast(message, kind) {
@@ -279,44 +441,154 @@
     return mesh;
   }
 
+  let queuedDirectPreview = null;
+  let directPreviewFrame = null;
+
+  function renderDirectPreview() {
+    directPreviewFrame = null;
+    const queued = queuedDirectPreview;
+    if (!queued) return;
+    clearThreeGroup(directManipulationPreviewGroup);
+    const session = queued.session;
+    const body = queued.computed.body || {};
+    let mesh = null;
+    if (session.kind === 'wall') {
+      const start = body.start_cm || session.wall.start;
+      const end = body.end_cm || session.wall.end;
+      const dx = end[0] - start[0], dy = end[1] - start[1];
+      const length = Math.max(1, Math.hypot(dx, dy));
+      const height = Number(session.wall.height_cm || 280);
+      mesh = new THREE.Mesh(new THREE.BoxGeometry(length, Number(session.wall.thickness_cm || 14), height),
+        new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: .28, depthWrite: false }));
+      mesh.position.set((start[0] + end[0]) / 2, (start[1] + end[1]) / 2,
+        Number(session.wall.base_z_cm || 0) + height / 2);
+      mesh.rotation.z = Math.atan2(dy, dx);
+    } else {
+      const opening = session.opening;
+      const center = body.center_cm || opening.center_cm;
+      const width = Number(body.width_cm || opening.width_cm || 80);
+      const height = Number(body.height_cm || opening.height_cm || (Number(opening.head_cm || 210) - Number(opening.sill_cm || 0)));
+      const sill = Number(body.sill_cm == null ? opening.sill_cm || 0 : body.sill_cm);
+      mesh = new THREE.Mesh(new THREE.BoxGeometry(width, Number(opening.wall_thickness_cm || 16) + 2, height),
+        new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: .34, depthWrite: false }));
+      mesh.position.set(center[0], center[1], sill + height / 2);
+      mesh.rotation.z = Number(opening.angle_rad || 0);
+    }
+    if (mesh) {
+      mesh.userData.editorOverlay = true;
+      mesh.renderOrder = 23;
+      directManipulationPreviewGroup.add(mesh);
+      const outline = new THREE.BoxHelper(mesh, 0x8fc5ff);
+      outline.userData.editorOverlay = true;
+      outline.material.depthTest = false;
+      outline.renderOrder = 24;
+      directManipulationPreviewGroup.add(outline);
+    }
+    const badge = byId('drag-value-badge');
+    const rect = viewport.getBoundingClientRect();
+    badge.textContent = `${queued.computed.label}${queued.free ? ' · livre' : ''}`;
+    badge.style.left = Math.max(56, Math.min(rect.width - 210, queued.clientX - rect.left + 14)) + 'px';
+    badge.style.top = Math.max(56, Math.min(rect.height - 68, queued.clientY - rect.top + 14)) + 'px';
+    badge.classList.add('open');
+    requestRender();
+  }
+
+  window.editorUpdateDirectPreview = function (session, computed, clientX, clientY, freeMovement) {
+    queuedDirectPreview = { session, computed, clientX, clientY, free: Boolean(freeMovement) };
+    if (!directPreviewFrame) directPreviewFrame = requestAnimationFrame(renderDirectPreview);
+  };
+
+  window.editorEndDirectPreview = function () {
+    queuedDirectPreview = null;
+    if (directPreviewFrame) cancelAnimationFrame(directPreviewFrame);
+    directPreviewFrame = null;
+    clearThreeGroup(directManipulationPreviewGroup);
+    byId('drag-value-badge').classList.remove('open');
+    requestRender();
+  };
+
+  function directHandle(position, color, data, size, geometry) {
+    const mesh = new THREE.Mesh(geometry || new THREE.SphereGeometry(size || 6, 18, 12),
+      new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: .96 }));
+    mesh.position.copy(position);
+    mesh.renderOrder = 24;
+    mesh.userData.editorDragHandle = data;
+    editorGizmoGroup.add(mesh);
+    return mesh;
+  }
+
   function updateSelectionGizmo() {
     clearThreeGroup(editorGizmoGroup);
     const center = selectedCenter();
     if (!center || !selectedObject) return;
     const length = Math.max(28, Math.min(70, (lastBounds && lastBounds.span || 400) * .07));
-    editorGizmoGroup.add(new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), center, length, 0xe95c5c, 8, 5));
-    editorGizmoGroup.add(new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), center, length, 0x59bd76, 8, 5));
-    editorGizmoGroup.add(new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), center, length, 0x5b9cf0, 8, 5));
-    if (selectedObject.userData.kind === 'wall' || selectedObject.userData.kind === 'opening') {
-      const outline = new THREE.BoxHelper(selectedObject, 0x4c9aff);
+    const kind = selectedObject.userData.kind;
+    if (kind === 'wall' || kind === 'opening') {
+      const outline = new THREE.BoxHelper(selectedObject, 0x3b82f6);
       outline.material.depthTest = false;
       outline.renderOrder = 20;
       editorGizmoGroup.add(outline);
+    }
+    if (kind === 'wall') {
+      const wall = selectedObject.userData.wall;
+      const dx = wall.end[0] - wall.start[0], dy = wall.end[1] - wall.start[1];
+      const wallLength = Math.max(1, Math.hypot(dx, dy));
+      const axis = new THREE.Vector3(dx / wallLength, dy / wallLength, 0);
+      editorGizmoGroup.add(new THREE.ArrowHelper(axis, center, length, 0x3b82f6, 8, 5));
+      editorGizmoGroup.add(new THREE.ArrowHelper(axis.clone().negate(), center, length, 0x3b82f6, 8, 5));
+      [wall.start, wall.end].forEach((point, index) => {
+        directHandle(new THREE.Vector3(point[0], point[1], center.z), 0x3b82f6, {
+          kind: 'wall', mode: index ? 'end' : 'start', wallId: asString(wall.id), cursor: 'ew-resize',
+        }, 7);
+      });
+    } else if (kind === 'opening') {
+      const opening = selectedObject.userData.opening;
+      const sourceAxis = opening.axis_cm || [Math.cos(opening.angle_rad || 0), Math.sin(opening.angle_rad || 0)];
+      const axisLength = Math.max(1e-6, Math.hypot(sourceAxis[0], sourceAxis[1]));
+      const axis = new THREE.Vector3(sourceAxis[0] / axisLength, sourceAxis[1] / axisLength, 0);
+      editorGizmoGroup.add(new THREE.ArrowHelper(axis, center, length, 0x3b82f6, 8, 5));
+      editorGizmoGroup.add(new THREE.ArrowHelper(axis.clone().negate(), center, length, 0x3b82f6, 8, 5));
+      directHandle(center, 0x3b82f6, {
+        kind: 'opening', mode: 'move', openingId: asString(opening.element_id), cursor: 'grab',
+      }, 6);
+      const halfWidth = Number(opening.width_cm || 80) / 2;
+      ['resize-start', 'resize-end'].forEach((mode, index) => {
+        const sign = index ? 1 : -1;
+        const position = center.clone().add(axis.clone().multiplyScalar(halfWidth * sign));
+        directHandle(position, 0xf0b44c, {
+          kind: 'opening', mode, openingId: asString(opening.element_id), cursor: 'ew-resize',
+        }, 6, new THREE.BoxGeometry(10, 10, 10));
+      });
+      const openingType = `${opening.type || ''} ${opening.family || ''}`.toLowerCase();
+      if (Number(opening.sill_cm || 0) > 0 || /janela|window/.test(openingType)) {
+        const zHandle = center.clone().add(new THREE.Vector3(0, 0, Number(opening.height_cm || 100) / 2 + 12));
+        editorGizmoGroup.add(new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), center, length, 0x59bd76, 8, 5));
+        directHandle(zHandle, 0x59bd76, {
+          kind: 'opening', mode: 'sill', openingId: asString(opening.element_id), cursor: 'ns-resize',
+        }, 6, new THREE.BoxGeometry(10, 10, 10));
+      }
     } else {
       const block = selectedBlock();
       if (block) {
-        const outline = candidateOverlay(block, 0x4c9aff, .12);
+        const outline = candidateOverlay(block, 0x3b82f6, .12);
         outline.renderOrder = 20;
         editorGizmoGroup.add(outline);
       }
     }
-    if (selectedObject.userData.kind === 'wall') {
-      const wall = selectedObject.userData.wall;
-      [wall.start, wall.end].forEach(point => {
-        const handle = new THREE.Mesh(new THREE.SphereGeometry(5, 12, 8),
-          new THREE.MeshBasicMaterial({ color: 0x4c9aff, depthTest: false }));
-        handle.position.set(point[0], point[1], Number(wall.base_z_cm) || 0);
-        handle.renderOrder = 21;
-        editorGizmoGroup.add(handle);
-      });
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(length * .62, 1.2, 8, 48),
-        new THREE.MeshBasicMaterial({ color: 0x4c9aff, depthTest: false }));
-      ring.position.copy(center);
-      ring.renderOrder = 21;
-      editorGizmoGroup.add(ring);
-    }
     requestRender();
   }
+
+  const gizmoRaycaster = new THREE.Raycaster();
+  const gizmoMouse = new THREE.Vector2();
+  window.editorPickDirectHandle = function (clientX, clientY) {
+    const rect = canvasEl.getBoundingClientRect();
+    gizmoMouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    gizmoMouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    gizmoRaycaster.setFromCamera(gizmoMouse, camera);
+    const hit = gizmoRaycaster.intersectObjects(editorGizmoGroup.children, true)
+      .find(item => item.object.userData && item.object.userData.editorDragHandle);
+    return hit ? Object.assign({}, hit.object.userData.editorDragHandle) : null;
+  };
 
   function updateQuickEdit() {
     const bar = byId('quick-edit-bar');
@@ -345,14 +617,14 @@
     let kind = '—';
     let metrics = '—';
     let modulation = '—';
-    let alerts = 0;
+    let alerts = currentWalls.filter(item => item.modulation_status && item.modulation_status.ok === false).length;
     if (selectedObject) {
       if (selectedObject.userData.kind === 'wall') {
         const item = selectedObject.userData.wall;
         selected = `Parede ${item.id}`; kind = item.name || item.layer || 'Parede';
         metrics = `${(Number(item.length_cm) / 100).toFixed(2)}m × ${Number(item.thickness_cm).toFixed(0)}cm`;
         modulation = item.modulation_status && item.modulation_status.ok === false ? 'Erro' : 'Correta';
-        alerts = item.modulation_status && item.modulation_status.ok === false ? 1 : 0;
+        alerts = Math.max(alerts, item.modulation_status && item.modulation_status.ok === false ? 1 : 0);
         breadcrumb.push(item.level || 'Pavimento', `Parede ${item.id}`);
       } else if (selectedObject.userData.kind === 'opening') {
         const item = selectedObject.userData.opening;
@@ -365,7 +637,7 @@
           selected = block.id || block.logical_code; kind = block.type_name || `Bloco ${block.logical_code}`;
           metrics = `${Number(block.length_cm).toFixed(0)} × ${Number(block.width_cm).toFixed(0)} × ${Number(block.height_cm).toFixed(0)}cm`;
           modulation = `Fiada ${Number(block.course_index) + 1}`;
-          alerts = block.is_error ? 1 : 0;
+          alerts = Math.max(alerts, block.is_error ? 1 : 0);
           breadcrumb.push(block.level || 'Pavimento', `Parede ${wall ? wall.id : 'Encontro'}`, `Fiada ${Number(block.course_index) + 1}`, block.id || block.logical_code);
         }
       }
@@ -661,6 +933,7 @@
 
   function setNavigationTool(tool) {
     state.navigationTool = tool;
+    window.editorNavigationTool = tool;
     document.querySelectorAll('[data-nav-tool]').forEach(button => button.classList.toggle('active', button.dataset.navTool === tool));
     controls.mouseButtons.LEFT = tool === 'orbit' ? THREE.MOUSE.ROTATE : tool === 'pan'
       ? THREE.MOUSE.PAN : tool === 'zoom' ? THREE.MOUSE.DOLLY : null;
@@ -670,6 +943,7 @@
 
   function setTool(tool) {
     state.activeTool = tool;
+    window.editorActiveTool = tool;
     document.querySelectorAll('[data-editor-tool]').forEach(button => button.classList.toggle('active', button.dataset.editorTool === tool));
     if (tool === 'select') {
       state.navigationTool = 'select';
@@ -700,11 +974,9 @@
     if (state.activeEditorRequest) state.activeEditorRequest.abort();
     state.activeEditorRequest = null;
     if (editPreviewTimer) window.clearTimeout(editPreviewTimer);
-    if (editSession) {
-      editSession = null;
-      controls.enabled = true;
-      if (committedViewData) renderModulationData(committedViewData);
-    }
+    if (state.sectionDrag) finishSectionDrag({ pointerId: state.sectionDrag.pointerId,
+      preventDefault() {}, stopImmediatePropagation() {} }, true);
+    if (editSession && window.cancelInteractiveEdit) window.cancelInteractiveEdit();
     state.measureStart = null;
     clearThreeGroup(previewFeedbackGroup);
     closeOverlays();
@@ -765,8 +1037,25 @@
 
   function updateHover(event) {
     if (editSession || state.activeTool === 'measure') return;
+    const directHandle = window.editorPickDirectHandle && window.editorPickDirectHandle(event.clientX, event.clientY);
+    if (directHandle) {
+      clearHover();
+      canvasEl.style.cursor = directHandle.cursor || 'grab';
+      const labels = { start: 'Arrastar início da parede', end: 'Arrastar fim da parede',
+        move: 'Arrastar ao longo da parede', 'resize-start': 'Arrastar para alterar largura',
+        'resize-end': 'Arrastar para alterar largura', sill: 'Arrastar peitoril verticalmente' };
+      const tooltip = byId('hover-tooltip');
+      tooltip.textContent = `${labels[directHandle.mode] || 'Arrastar elemento'}\nShift: movimento livre`;
+      tooltip.style.left = Math.min(viewport.clientWidth - 220, event.clientX + 13) + 'px';
+      tooltip.style.top = Math.min(viewport.clientHeight - 75, event.clientY + 13) + 'px';
+      tooltip.style.display = 'block';
+      return;
+    }
     const hit = pickObjectAt(event.clientX, event.clientY);
     const object = hit && hit.object;
+    canvasEl.style.cursor = object && currentModelId
+      && (object.userData.kind === 'wall' || object.userData.kind === 'opening') ? 'grab'
+        : state.navigationTool === 'select' ? 'default' : canvasEl.style.cursor;
     if (object !== state.hoverObject || (hit && hit.instanceId) !== state.hoverInstanceId) {
       clearHover();
       if (!object || object === selectedObject) return;
@@ -820,7 +1109,7 @@
       if (!grouped.has(key)) grouped.set(key, candidate);
     });
     [...grouped.entries()].sort((a, b) => a[0] - b[0]).slice(0, 80).forEach(([course, candidate]) => {
-      const sprite = makeTextSprite(String(course + 1).padStart(2, '0'), '#4c9aff');
+      const sprite = makeTextSprite(String(course + 1).padStart(2, '0'), '#3b82f6');
       if (wall) {
         const dx = wall.end[0] - wall.start[0], dy = wall.end[1] - wall.start[1];
         const length = Math.max(1, Math.hypot(dx, dy));
@@ -865,6 +1154,8 @@
     const panel = byId('diagnostics-panel');
     const content = byId('diagnostics-content');
     setPanelOpen(panel, true);
+    const elementTab = byId('diagnostics-panel').querySelector('[data-diagnostic-tab="element"]');
+    if (elementTab) elementTab.click();
     if (!wall) {
       content.textContent = 'Selecione uma parede, abertura ou bloco para inspecionar.';
       return;
@@ -883,6 +1174,70 @@
     ].filter(Boolean).join('\n');
   }
 
+  function rebuildDiagnosticDock() {
+    const conflicts = currentWalls.filter(wall => {
+      const status = wall.modulation_status || {};
+      return status.ok === false || currentBlockCandidates.some(candidate => candidate.is_error && intersects(candidateWallIds(candidate), wallIds(wall)));
+    });
+    const wallFilter = byId('diagnostic-filter-wall');
+    const selectedFilter = wallFilter.value;
+    wallFilter.innerHTML = '<option value="">Todas as paredes</option>';
+    conflicts.forEach(wall => {
+      const option = document.createElement('option');
+      option.value = asString(wall.id); option.textContent = `Parede ${wall.id}`; wallFilter.appendChild(option);
+    });
+    wallFilter.value = selectedFilter;
+    const container = byId('diagnostics-conflicts');
+    container.innerHTML = '';
+    conflicts.forEach(wall => {
+      const status = wall.modulation_status || {};
+      const severity = status.ok === false ? 'error' : 'warning';
+      const row = document.createElement('div');
+      row.className = `diagnostic-problem ${severity}`;
+      row.dataset.wallId = asString(wall.id); row.dataset.severity = severity;
+      const copy = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = `${severity === 'error' ? '● Erro' : '△ Alerta'} · Parede ${wall.id} · ${status.code || 'MODULAÇÃO'}`;
+      const reason = document.createElement('small');
+      reason.textContent = `${status.reason || 'Revisão necessária'} · ${diagnosticSuggestion(status)}`;
+      copy.append(title, reason);
+      const actions = document.createElement('div'); actions.className = 'problem-actions';
+      [['locate', 'Localizar'], ['isolate', 'Isolar'], ['fix', 'Tentar corrigir']].forEach(([action, label]) => {
+        const button = document.createElement('button'); button.type = 'button'; button.dataset.diagnosticAction = action;
+        button.dataset.wallId = asString(wall.id); button.textContent = label; actions.appendChild(button);
+      });
+      row.append(copy, actions); container.appendChild(row);
+    });
+    if (!conflicts.length) container.textContent = '✓ Nenhum conflito detectado no modelo atual.';
+    byId('diagnostics-history').textContent = byId('history-list').textContent;
+    const wall = currentWall();
+    if (!wall) byId('diagnostics-dependencies').textContent = 'Selecione uma parede, abertura ou bloco para ver suas dependências.';
+    else {
+      const relatedOpenings = currentOpenings.filter(opening => intersects(openingWallIds(opening), wallIds(wall)));
+      const relatedBlocks = currentBlockCandidates.filter(candidate => intersects(candidateWallIds(candidate), wallIds(wall)));
+      const connected = currentWalls.filter(other => other !== wall && intersects(connectedIdsFor(wall), wallIds(other)));
+      byId('diagnostics-dependencies').textContent = [
+        `Parede ${wall.id}`,
+        `Paredes conectadas: ${connected.map(item => item.id).join(', ') || 'nenhuma'}`,
+        `Aberturas hospedadas: ${relatedOpenings.map(item => item.element_id).join(', ') || 'nenhuma'}`,
+        `Blocos dependentes: ${relatedBlocks.length}`,
+        `Fiadas afetadas: ${new Set(relatedBlocks.map(item => Number(item.course_index) + 1)).size}`,
+      ].join('\n');
+    }
+    filterDiagnosticProblems();
+  }
+
+  function filterDiagnosticProblems() {
+    const severity = byId('diagnostic-filter-severity').value;
+    const wallId = byId('diagnostic-filter-wall').value;
+    const textFilter = byId('diagnostic-filter-text').value.trim().toLowerCase();
+    byId('diagnostics-conflicts').querySelectorAll('.diagnostic-problem').forEach(row => {
+      row.hidden = Boolean((severity && row.dataset.severity !== severity)
+        || (wallId && row.dataset.wallId !== wallId)
+        || (textFilter && !row.textContent.toLowerCase().includes(textFilter)));
+    });
+  }
+
   function makeDiagnosticSprite(color, wall) {
     const sprite = makeTextSprite(wall.modulation_status && wall.modulation_status.ok === false ? '!' : '✓', color);
     sprite.scale.set(24, 11, 1);
@@ -899,7 +1254,7 @@
     if (!diagnostic) return;
     currentWalls.filter(wallMatchesFilter).forEach(wall => {
       const status = wall.modulation_status || {};
-      diagnosticMarkersGroup.add(makeDiagnosticSprite(status.ok === false ? '#e45b64' : '#55bd73', wall));
+      diagnosticMarkersGroup.add(makeDiagnosticSprite(status.ok === false ? '#ef4444' : '#22c55e', wall));
     });
     requestRender();
   }
@@ -930,20 +1285,66 @@
     const nextMap = new Map(next.filter(item => !affected.size || intersects(candidateWallIds(item), affected))
       .map(item => [candidateKey(item), item]));
     [...previousMap].filter(([key]) => !nextMap.has(key)).slice(0, 220)
-      .forEach(([, candidate]) => previewFeedbackGroup.add(candidateOverlay(candidate, 0xe45b64, .1)));
+      .forEach(([, candidate]) => previewFeedbackGroup.add(candidateOverlay(candidate, 0xef4444, .1)));
     [...nextMap].filter(([key]) => !previousMap.has(key)).slice(0, 220)
-      .forEach(([, candidate]) => previewFeedbackGroup.add(candidateOverlay(candidate, 0x4c9aff, .16)));
+      .forEach(([, candidate]) => previewFeedbackGroup.add(candidateOverlay(candidate, 0x3b82f6, .16)));
     currentWalls.filter(wall => intersects(wallIds(wall), affected)).forEach(wall => {
       const mesh = wallGroup.children.find(item => item.userData.wall === wall);
-      if (mesh) { const helper = new THREE.BoxHelper(mesh, 0x4c9aff); helper.material.transparent = true; helper.material.opacity = .35; previewFeedbackGroup.add(helper); }
+      if (mesh) { const helper = new THREE.BoxHelper(mesh, 0x3b82f6); helper.material.transparent = true; helper.material.opacity = .35; previewFeedbackGroup.add(helper); }
     });
     requestRender();
   }
 
-  function applyLiveSection() {
+  function sectionSnapshot() {
+    return { enabled: byId('section-live-enabled').checked, axis: byId('section-live-axis').value,
+      positionCm: Number(byId('section-live-position').value || 0) * 100, inverted: state.sectionInverted };
+  }
+
+  function setSectionPositionCm(positionCm) {
+    const value = Number.isFinite(positionCm) ? positionCm : 0;
+    byId('section-live-position').value = (value / 100).toFixed(3);
+    byId('section-live-slider').value = Math.round(value);
+  }
+
+  function applySectionSnapshot(snapshot) {
+    byId('section-live-enabled').checked = snapshot.enabled;
+    byId('section-live-axis').value = snapshot.axis;
+    setSectionPositionCm(snapshot.positionCm);
+    state.sectionInverted = Boolean(snapshot.inverted);
+    byId('section-invert').classList.toggle('active', state.sectionInverted);
+    applyLiveSection();
+  }
+
+  function sectionDescriptor() {
+    const axis = byId('section-live-axis').value;
+    const position = Number(byId('section-live-position').value || 0) * 100;
+    const bounds = lastBounds || { cx: 0, cy: 0, cz: 140, span: 600 };
+    let normal;
+    let point;
+    if (axis === 'wall') {
+      const wall = currentWall();
+      if (!wall) return null;
+      const dx = wall.end[0] - wall.start[0], dy = wall.end[1] - wall.start[1];
+      const length = Math.max(1, Math.hypot(dx, dy));
+      normal = new THREE.Vector3(-dy / length, dx / length, 0);
+      point = new THREE.Vector3((wall.start[0] + wall.end[0]) / 2,
+        (wall.start[1] + wall.end[1]) / 2, bounds.cz).add(normal.clone().multiplyScalar(position));
+    } else {
+      normal = axis === 'x' ? new THREE.Vector3(-1, 0, 0) : axis === 'y'
+        ? new THREE.Vector3(0, -1, 0) : new THREE.Vector3(0, 0, -1);
+      point = axis === 'x' ? new THREE.Vector3(position, bounds.cy, bounds.cz)
+        : axis === 'y' ? new THREE.Vector3(bounds.cx, position, bounds.cz)
+          : new THREE.Vector3(bounds.cx, bounds.cy, position);
+    }
+    if (state.sectionInverted) normal.negate();
+    return { axis, position, normal, point, plane: new THREE.Plane(normal, -normal.dot(point)), bounds };
+  }
+
+  function applyLiveSection(forceMaterials = false) {
     const enabled = byId('section-live-enabled').checked;
     clearThreeGroup(sectionVisualGroup);
     if (!enabled) {
+      setSectionHover(null);
       sectionPlane = null;
       renderer.localClippingEnabled = false;
       scene.traverse(item => {
@@ -954,46 +1355,228 @@
       requestRender();
       return;
     }
-    const axis = byId('section-live-axis').value;
-    const position = Number(byId('section-live-position').value) * 100;
-    let plane;
-    if (axis === 'wall') {
-      const wall = currentWall();
-      if (!wall) { setStatus('Selecione uma parede para corte longitudinal.', true); return; }
-      const dx = wall.end[0] - wall.start[0], dy = wall.end[1] - wall.start[1];
-      const length = Math.max(1, Math.hypot(dx, dy));
-      const normal = new THREE.Vector3(-dy / length, dx / length, 0);
-      const center = new THREE.Vector3((wall.start[0] + wall.end[0]) / 2, (wall.start[1] + wall.end[1]) / 2, 0);
-      plane = new THREE.Plane(normal, -normal.dot(center));
-    } else {
-      const normal = axis === 'x' ? new THREE.Vector3(-1, 0, 0) : axis === 'y'
-        ? new THREE.Vector3(0, -1, 0) : new THREE.Vector3(0, 0, -1);
-      plane = new THREE.Plane(normal, Number.isFinite(position) ? position : 0);
-    }
-    sectionPlane = plane;
+    const descriptor = sectionDescriptor();
+    if (!descriptor) { setStatus('Selecione uma parede para corte longitudinal.', true); return; }
+    const plane = descriptor.plane;
+    const size = Math.max(300, (descriptor.bounds.span || 600) * 1.3);
+    const installClipping = !sectionPlane;
+    if (sectionPlane) sectionPlane.copy(plane);
+    else sectionPlane = plane;
     renderer.localClippingEnabled = true;
-    scene.traverse(item => {
-      if (!item.material || item.userData.editorOverlay) return;
-      (Array.isArray(item.material) ? item.material : [item.material]).forEach(material => {
-        material.clippingPlanes = [plane]; material.needsUpdate = true;
+    if (installClipping || forceMaterials) {
+      scene.traverse(item => {
+        if (!item.material || item.userData.editorOverlay) return;
+        (Array.isArray(item.material) ? item.material : [item.material]).forEach(material => {
+          material.clippingPlanes = [sectionPlane]; material.needsUpdate = true;
+        });
       });
-    });
-    const helper = new THREE.PlaneHelper(plane, Math.max(300, (lastBounds && lastBounds.span || 600) * 1.3), 0x4c9aff);
+    }
+    const helper = new THREE.PlaneHelper(sectionPlane, size, 0x3b82f6);
     helper.userData.editorOverlay = true;
-    helper.material.transparent = true; helper.material.opacity = .35; helper.renderOrder = 18;
+    helper.material.transparent = true; helper.material.opacity = .5; helper.renderOrder = 18;
     sectionVisualGroup.add(helper);
+
+    const surface = new THREE.Mesh(new THREE.PlaneGeometry(size, size),
+      new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: .07,
+        depthWrite: false, side: THREE.DoubleSide }));
+    surface.position.copy(descriptor.point);
+    surface.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), descriptor.normal);
+    surface.userData = { editorOverlay: true, sectionDragHandle: true, sectionSurface: true, sectionAxis: descriptor.axis };
+    surface.renderOrder = 17;
+    sectionVisualGroup.add(surface);
+
+    const arrowLength = Math.max(45, Math.min(110, size * .12));
+    const positive = new THREE.ArrowHelper(descriptor.normal, descriptor.point, arrowLength, 0x72b4ff, 13, 8);
+    const negative = new THREE.ArrowHelper(descriptor.normal.clone().negate(), descriptor.point, arrowLength, 0x72b4ff, 13, 8);
+    [positive, negative].forEach(arrow => { arrow.userData.editorOverlay = true; sectionVisualGroup.add(arrow); });
+    const handle = new THREE.Mesh(new THREE.SphereGeometry(11, 20, 14),
+      new THREE.MeshBasicMaterial({ color: 0x72b4ff, depthTest: false }));
+    handle.position.copy(descriptor.point);
+    handle.userData = { editorOverlay: true, sectionDragHandle: true, sectionAxis: descriptor.axis };
+    handle.renderOrder = 22;
+    sectionVisualGroup.add(handle);
+
+    const label = makeTextSprite(`${descriptor.axis.toUpperCase()} ${(descriptor.position / 100).toFixed(2)}m`, '#3b82f6');
+    label.position.copy(descriptor.point).add(new THREE.Vector3(0, 0, 24));
+    label.userData.editorOverlay = true;
+    label.renderOrder = 23;
+    sectionVisualGroup.add(label);
     byId('footer-section').classList.add('active');
     requestRender();
   }
 
+  const sectionRaycaster = new THREE.Raycaster();
+  const sectionMouse = new THREE.Vector2();
+
+  function sectionHitAt(clientX, clientY) {
+    if (!byId('section-live-enabled').checked) return null;
+    const rect = canvasEl.getBoundingClientRect();
+    sectionMouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    sectionMouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    sectionRaycaster.setFromCamera(sectionMouse, camera);
+    const hits = sectionRaycaster.intersectObjects(sectionVisualGroup.children, true)
+      .filter(hit => hit.object.userData && hit.object.userData.sectionDragHandle);
+    return hits.find(hit => !hit.object.userData.sectionSurface)
+      || ((state.activeTool === 'section') ? hits[0] : null);
+  }
+
+  function setSectionHover(hit) {
+    if (state.sectionHover === (hit && hit.object)) return;
+    if (state.sectionHover && state.sectionHover.material) {
+      state.sectionHover.material.opacity = state.sectionHover.userData.sectionSurface ? .07 : 1;
+      state.sectionHover.scale.setScalar(1);
+    }
+    state.sectionHover = hit && hit.object || null;
+    canvasEl.classList.remove('section-hover-z', 'section-hover-xy');
+    if (state.sectionHover) {
+      if (state.sectionHover.material) state.sectionHover.material.opacity = state.sectionHover.userData.sectionSurface ? .15 : 1;
+      if (!state.sectionHover.userData.sectionSurface) state.sectionHover.scale.setScalar(1.18);
+      canvasEl.classList.add(state.sectionHover.userData.sectionAxis === 'z' ? 'section-hover-z' : 'section-hover-xy');
+    }
+    requestRender();
+  }
+
+  function showSectionDragBadge(positionCm, axis, event, freeMovement) {
+    const badge = byId('drag-value-badge');
+    const rect = viewport.getBoundingClientRect();
+    badge.textContent = `Corte ${axis.toUpperCase()} = ${(positionCm / 100).toFixed(2)} m${freeMovement ? ' · livre' : ''}`;
+    badge.style.left = Math.max(56, Math.min(rect.width - 220, event.clientX - rect.left + 14)) + 'px';
+    badge.style.top = Math.max(56, Math.min(rect.height - 68, event.clientY - rect.top + 14)) + 'px';
+    badge.classList.add('open');
+  }
+
+  function updateSectionHistoryButtons() {
+    byId('btn-undo').disabled = !(state.sectionUndo.length || window.editorBackendCanUndo);
+    byId('btn-redo').disabled = !(state.sectionRedo.length || window.editorBackendCanRedo);
+  }
+
+  function pushSectionHistory(before, after) {
+    state.sectionUndo.push({ before, after });
+    if (state.sectionUndo.length > 50) state.sectionUndo.shift();
+    state.sectionRedo.length = 0;
+    updateSectionHistoryButtons();
+  }
+
+  function undoSection() {
+    const action = state.sectionUndo.pop();
+    if (!action) return false;
+    state.sectionRedo.push(action);
+    applySectionSnapshot(action.before);
+    updateSectionHistoryButtons();
+    showToast('Movimento do plano de corte desfeito', 'ok');
+    return true;
+  }
+
+  function redoSection() {
+    const action = state.sectionRedo.pop();
+    if (!action) return false;
+    state.sectionUndo.push(action);
+    applySectionSnapshot(action.after);
+    updateSectionHistoryButtons();
+    showToast('Movimento do plano de corte refeito', 'ok');
+    return true;
+  }
+
+  function applyPendingSectionDrag() {
+    const drag = state.sectionDrag;
+    if (!drag || drag.pendingPosition == null) return;
+    drag.frame = null;
+    setSectionPositionCm(drag.pendingPosition);
+    applyLiveSection();
+    drag.pendingPosition = null;
+  }
+
+  canvasEl.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || state.sectionDrag) return;
+    const hit = sectionHitAt(event.clientX, event.clientY);
+    if (!hit) return;
+    const descriptor = sectionDescriptor();
+    if (!descriptor) return;
+    const startPoint = worldPointAlongAxis(event.clientX, event.clientY,
+      descriptor.point, descriptor.normal, event.shiftKey);
+    if (!startPoint) return;
+    state.sectionDrag = { pointerId: event.pointerId, descriptor, startPoint,
+      startPosition: descriptor.position, before: sectionSnapshot(), clientStart: [event.clientX, event.clientY],
+      moved: false, pendingPosition: null, frame: null };
+    window.editorSectionDragging = true;
+    controls.enabled = false;
+    canvasEl.classList.add('direct-dragging');
+    canvasEl.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+
+  canvasEl.addEventListener('pointermove', event => {
+    const drag = state.sectionDrag;
+    if (!drag) {
+      setSectionHover(sectionHitAt(event.clientX, event.clientY));
+      return;
+    }
+    const point = worldPointAlongAxis(event.clientX, event.clientY,
+      drag.descriptor.point, drag.descriptor.normal, event.shiftKey);
+    if (!point) return;
+    if (!drag.moved && Math.hypot(event.clientX - drag.clientStart[0], event.clientY - drag.clientStart[1]) < 2) return;
+    drag.moved = true;
+    const delta = point.clone().sub(drag.startPoint).dot(drag.descriptor.normal);
+    drag.pendingPosition = snapScalar(drag.startPosition + delta, event.shiftKey);
+    if (!drag.frame) drag.frame = requestAnimationFrame(applyPendingSectionDrag);
+    showSectionDragBadge(drag.pendingPosition, drag.descriptor.axis, event, event.shiftKey);
+    setStatus(`Corte ${drag.descriptor.axis.toUpperCase()} = ${(drag.pendingPosition / 100).toFixed(2)}m · atualização em tempo real`);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+
+  function finishSectionDrag(event, cancel) {
+    const drag = state.sectionDrag;
+    if (!drag) return;
+    if (drag.frame) { cancelAnimationFrame(drag.frame); drag.frame = null; }
+    if (drag.pendingPosition != null) applyPendingSectionDrag();
+    if (cancel) applySectionSnapshot(drag.before);
+    else if (drag.moved) pushSectionHistory(drag.before, sectionSnapshot());
+    state.sectionDrag = null;
+    window.editorSectionDragging = false;
+    controls.enabled = true;
+    canvasEl.classList.remove('direct-dragging');
+    byId('drag-value-badge').classList.remove('open');
+    if (event.pointerId != null && canvasEl.hasPointerCapture(event.pointerId)) canvasEl.releasePointerCapture(event.pointerId);
+    if (!cancel && drag.moved) { setStatus('Plano de corte reposicionado.'); showToast('Plano de corte atualizado', 'ok'); }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
+  canvasEl.addEventListener('pointerup', event => finishSectionDrag(event, false), true);
+  canvasEl.addEventListener('pointercancel', event => finishSectionDrag(event, true), true);
+
   function updateProjectName() {
     const path = byId('dxf-path').value.trim();
-    byId('project-name').textContent = path ? path.split(/[\\/]/).pop() : 'Sem projeto';
+    const name = path ? path.split(/[\\/]/).pop() : 'Sem projeto';
+    byId('project-name').textContent = name;
+    byId('app-project-name').textContent = path ? name : 'Sem projeto aberto';
+    byId('app-project-detail').textContent = path
+      ? `${currentWalls.length} parede(s) · ${currentOpenings.length} abertura(s)`
+      : 'Aguardando arquivo DWG ou captura do Revit';
+    const sync = byId('app-sync-state');
+    const fromRevit = /\.json$/i.test(path) || Boolean(currentWalls.some(wall => wall.element_id));
+    sync.classList.toggle('sync-ok', Boolean(path && fromRevit));
+    sync.classList.toggle('sync-waiting', !path || !fromRevit);
+    sync.querySelector('span').textContent = path
+      ? (fromRevit ? 'Revit sincronizado' : 'Projeto DWG carregado')
+      : 'Revit aguardando captura';
+    byId('status-revit').textContent = path && fromRevit ? 'Revit: sincronizado' : path ? 'Revit: arquivo local' : 'Revit: aguardando';
+  }
+
+  function updateProjectSnap(data) {
+    const configured = Number(data && (data.project_module_cm
+      || data.modulation_module_cm || data.setup && data.setup.module_cm));
+    window.editorProjectModuleCm = Number.isFinite(configured) && configured > 0 ? configured : 20;
+    const option = byId('snap-step').querySelector('option[value="project"]');
+    if (option) option.textContent = `Snap módulo (${window.editorProjectModuleCm.toFixed(0)}cm)`;
+    if (byId('snap-step').value === 'project') window.editorSnapCm = window.editorProjectModuleCm;
   }
 
   function setTheme(theme) {
     document.documentElement.dataset.theme = theme;
-    scene.background = new THREE.Color(theme === 'light' ? 0xe7e9ec : 0x202124);
+    scene.background = new THREE.Color(theme === 'light' ? 0xe7e9ec : 0x111318);
     const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
     gridMaterials.forEach((material, index) => {
       material.color.set(theme === 'light' ? (index === 0 ? 0x8b9199 : 0xb4b9bf)
@@ -1107,6 +1690,7 @@
     applyEditorVisibility();
     rebuildDiagnosticMarkers();
     byId('btn-diagnostic-mode').classList.toggle('active', mode === 'diagnostic');
+    syncVisibilityPopover();
   }
 
   function centerOpeningInWall(opening, wall) {
@@ -1124,7 +1708,9 @@
     else if (action.indexOf('shift-') === 0) shiftOpening(opening, Number(action.substring(6)));
     else if (action === 'center-wall') centerOpeningInWall(opening, currentWall());
     else if (action === 'duplicate') postEditorAction('/api/duplicate-opening', { opening_id: opening.element_id, delta_cm: 10 }, 'Abertura duplicada');
-    else if (action === 'delete') postEditorAction('/api/delete-opening', { opening_id: opening.element_id }, 'Abertura excluída');
+    else if (action === 'delete' && window.confirm(`Excluir a abertura ${opening.element_id}? Esta ação poderá ser desfeita pelo histórico.`)) {
+      postEditorAction('/api/delete-opening', { opening_id: opening.element_id }, 'Abertura excluída');
+    }
     else if (action === 'host-wall' || action === 'isolate') isolateWall(currentWall());
     else if (action === 'diagnostic') showDiagnostics(currentWall());
   }
@@ -1158,10 +1744,101 @@
   ['sidebar', 'selection-panel', 'section-panel', 'diagnostics-panel'].forEach(id => setupPanel(byId(id)));
   setPanelOpen(byId('sidebar'), false);
   updateThemeAndShadows();
+  setImportStep(1);
+  syncVisibilityPopover();
+
+  document.querySelectorAll('[data-workspace-tab]').forEach(tab => tab.addEventListener('click', () => openWorkspaceSection(tab.dataset.workspaceTab)));
+  byId('btn-import-back').addEventListener('click', () => setImportStep(state.importStep - 1));
+  byId('btn-import-next').addEventListener('click', () => {
+    if (state.importStep < 4) setImportStep(state.importStep + 1);
+    else byId('btn-load').click();
+  });
+
+  byId('btn-app-import').addEventListener('click', () => openWorkspaceSection('import', { step: 1 }));
+  byId('btn-app-revit').addEventListener('click', () => {
+    openWorkspaceSection('import', { step: 1 });
+    byId('btn-pick-json').focus();
+    showToast('Selecione a captura JSON gerada pelo Revit.');
+  });
+  byId('btn-app-settings').addEventListener('click', () => openWorkspaceSection('visibility'));
+  byId('btn-app-help').addEventListener('click', () => openOverlay('help-overlay'));
+  byId('btn-app-fullscreen').addEventListener('click', async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen();
+    } catch (error) { showToast(`Tela cheia indisponível: ${error.message || error}`, 'warning'); }
+  });
+  byId('btn-app-save').addEventListener('click', () => {
+    try {
+      localStorage.setItem('modulador-externo-3d-last-model', JSON.stringify(currentExportPayload()));
+      showToast('Estado local salvo neste navegador.', 'ok');
+      appendDiagnosticLog('Estado local salvo.');
+    } catch (error) { showToast(`Não foi possível salvar: ${error.message || error}`, 'error'); }
+  });
+  byId('btn-app-export').addEventListener('click', () => {
+    downloadExport(currentExportPayload(), 'modulacao');
+    showToast('Arquivo de modulação exportado.', 'ok');
+    appendDiagnosticLog('Modelo exportado em JSON.');
+  });
+  byId('btn-app-send-revit').addEventListener('click', () => {
+    const payload = currentExportPayload();
+    if (!payload.model_id) { showToast('Carregue e module um projeto antes de enviar ao Revit.', 'warning'); return; }
+    if (window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage === 'function') {
+      window.chrome.webview.postMessage({ type: 'modulador:apply-to-revit', payload });
+      showToast('Alterações enviadas ao conector do Revit.', 'ok');
+      appendDiagnosticLog('Pacote encaminhado ao WebView do Revit.');
+    } else {
+      downloadExport(payload, 'para-revit');
+      showToast('Pacote para o Revit exportado; importe-o pelo comando pyRevit.', 'warning');
+      appendDiagnosticLog('Conector WebView ausente; pacote para Revit exportado.');
+    }
+  });
+
+  byId('btn-visibility-popover').addEventListener('click', () => { syncVisibilityPopover(); togglePopover('visibility-popover'); });
+  byId('btn-more-tools').addEventListener('click', () => togglePopover('more-tools-popover'));
+  document.querySelectorAll('[data-close-popover]').forEach(button => button.addEventListener('click', () => byId(button.dataset.closePopover).classList.remove('open')));
+  byId('quick-display-mode').addEventListener('change', event => { setVisualMode(event.target.value); syncVisibilityPopover(); });
+  document.querySelectorAll('[data-visibility-toggle]').forEach(button => button.addEventListener('click', () => {
+    const source = byId(button.dataset.visibilityToggle);
+    if (!source) return;
+    source.checked = !source.checked;
+    source.dispatchEvent(new Event('change'));
+    syncVisibilityPopover();
+  }));
+  byId('btn-visibility-details').addEventListener('click', () => { closePopovers(); openWorkspaceSection('visibility'); });
+  document.querySelectorAll('[data-more-action]').forEach(button => button.addEventListener('click', () => {
+    closePopovers();
+    const action = button.dataset.moreAction;
+    if (action === 'calculator' || action === 'history') openWorkspaceSection(action);
+    else if (action === 'diagnostics') showDiagnostics(currentWall());
+    else if (action === 'commands') openOverlay('command-palette');
+  }));
+  document.querySelectorAll('[data-diagnostic-tab]').forEach(button => button.addEventListener('click', () => {
+    document.querySelectorAll('[data-diagnostic-tab]').forEach(item => item.classList.toggle('active', item === button));
+    document.querySelectorAll('[data-diagnostic-content]').forEach(item => item.classList.toggle('active', item.dataset.diagnosticContent === button.dataset.diagnosticTab));
+  }));
+  ['diagnostic-filter-severity', 'diagnostic-filter-wall'].forEach(id => byId(id).addEventListener('change', filterDiagnosticProblems));
+  byId('diagnostic-filter-text').addEventListener('input', filterDiagnosticProblems);
+  byId('diagnostics-conflicts').addEventListener('click', event => {
+    const button = event.target.closest('[data-diagnostic-action]');
+    if (!button) return;
+    const wall = currentWalls.find(item => wallIds(item).has(asString(button.dataset.wallId)));
+    if (!wall) return;
+    if (button.dataset.diagnosticAction === 'locate') { focusOnWallId(wall.id); showDiagnostics(wall); }
+    else if (button.dataset.diagnosticAction === 'isolate') isolateWall(wall);
+    else if (button.dataset.diagnosticAction === 'fix') postEditorAction('/api/edit-wall', {
+      wall_id: wall.id, start_cm: wall.start, end_cm: wall.end,
+      thickness_cm: wall.thickness_cm, height_cm: wall.height_cm,
+    }, `Parede ${wall.id} modulada novamente`);
+  });
+  document.querySelectorAll('[data-close-overlay]').forEach(button => button.addEventListener('click', () => byId(button.dataset.closeOverlay).classList.remove('open')));
 
   document.addEventListener('click', event => {
     const close = event.target.closest('[data-panel-close]');
-    if (close) setPanelOpen(byId(close.dataset.panelClose), false);
+    if (close) {
+      setPanelOpen(byId(close.dataset.panelClose), false);
+      if (close.dataset.panelClose === 'section-panel' && state.activeTool === 'section') setTool('select');
+    }
     const minimize = event.target.closest('[data-panel-minimize]');
     if (minimize) byId(minimize.dataset.panelMinimize).classList.toggle('minimized');
     const dock = event.target.closest('[data-panel-dock]');
@@ -1170,6 +1847,7 @@
       const next = panel.classList.contains('docked-right') ? '' : panel.classList.contains('docked-left') ? 'docked-right' : 'docked-left';
       panel.classList.remove('docked-left', 'docked-right'); if (next) panel.classList.add(next);
     }
+    if (!event.target.closest('.editor-popover,#btn-visibility-popover,#btn-more-tools')) closePopovers();
   });
 
   byId('btn-project-panel').addEventListener('click', () => setPanelOpen(byId('sidebar'), !byId('sidebar').classList.contains('open')));
@@ -1190,7 +1868,7 @@
     showToast(state.realtime ? 'Modulação em tempo real ativada' : 'Prévia em tempo real pausada', state.realtime ? 'ok' : 'warning');
   });
   byId('snap-step').addEventListener('change', event => {
-    window.editorSnapCm = Number(event.target.value);
+    window.editorSnapCm = event.target.value === 'project' ? Number(window.editorProjectModuleCm || 20) : Number(event.target.value);
     const label = window.editorSnapCm === 0 ? 'desligado' : window.editorSnapCm < 1 ? `${window.editorSnapCm * 10}mm` : `${window.editorSnapCm * 10}mm`;
     byId('status-snap').textContent = `Snap: ${label}`; byId('status-scale').textContent = `Movimento: ${label}`;
   });
@@ -1226,7 +1904,9 @@
       if (opening) postEditorAction('/api/duplicate-opening', { opening_id: opening.element_id, delta_cm: 10 }, 'Abertura duplicada');
     } else if (event.target.closest('[data-delete-opening]')) {
       const opening = selectedObject && selectedObject.userData.opening;
-      if (opening) postEditorAction('/api/delete-opening', { opening_id: opening.element_id }, 'Abertura excluída');
+      if (opening && window.confirm(`Excluir a abertura ${opening.element_id}? Esta ação poderá ser desfeita pelo histórico.`)) {
+        postEditorAction('/api/delete-opening', { opening_id: opening.element_id }, 'Abertura excluída');
+      }
     }
   });
   byId('quick-edit-bar').addEventListener('click', event => {
@@ -1237,12 +1917,16 @@
   });
 
   let hoverFrame = null;
+  canvasEl.addEventListener('pointerdown', event => {
+    state.additiveSelection = Boolean(event.ctrlKey || event.metaKey);
+  }, true);
+  canvasEl.addEventListener('click', () => window.setTimeout(() => { state.additiveSelection = false; }, 0));
   canvasEl.addEventListener('pointermove', event => {
     const point = worldPointAt(event.clientX, event.clientY);
     if (point) byId('status-coordinates').textContent = `X ${(point.x / 100).toFixed(2)} · Y ${(point.y / 100).toFixed(2)} · Z ${(point.z / 100).toFixed(2)}m`;
     if (!hoverFrame) hoverFrame = requestAnimationFrame(() => { hoverFrame = null; updateHover(event); });
   });
-  canvasEl.addEventListener('pointerleave', () => { clearHover(); requestRender(); });
+  canvasEl.addEventListener('pointerleave', () => { clearHover(); setSectionHover(null); requestRender(); });
   canvasEl.addEventListener('click', event => {
     const markerWall = diagnosticHit(event);
     if (markerWall) { showDiagnostics(markerWall); focusOnWallId(markerWall.id); return; }
@@ -1279,7 +1963,7 @@
 
   byId('toolbar-display-mode').addEventListener('change', event => setVisualMode(event.target.value));
   byId('display-mode').addEventListener('change', () => {
-    byId('toolbar-display-mode').value = byId('display-mode').value; rebuildDiagnosticMarkers();
+    byId('toolbar-display-mode').value = byId('display-mode').value; rebuildDiagnosticMarkers(); syncVisibilityPopover();
   });
   byId('toolbar-course-filter').addEventListener('change', event => {
     byId('course-filter').value = event.target.value;
@@ -1298,7 +1982,7 @@
   byId('btn-cancel-action').addEventListener('click', cancelActiveAction);
 
   byId('section-live-enabled').addEventListener('change', applyLiveSection);
-  byId('section-live-axis').addEventListener('change', applyLiveSection);
+  byId('section-live-axis').addEventListener('change', event => { if (event.target.value === 'wall') setSectionPositionCm(0); applyLiveSection(); });
   byId('section-live-slider').addEventListener('input', event => { byId('section-live-position').value = (Number(event.target.value) / 100).toFixed(2); applyLiveSection(); });
   byId('section-live-position').addEventListener('input', event => { byId('section-live-slider').value = Math.round(Number(event.target.value) * 100); applyLiveSection(); });
   byId('section-through-selection').addEventListener('click', () => {
@@ -1307,6 +1991,14 @@
     byId('section-live-position').value = ((axis === 'x' ? center.x : axis === 'y' ? center.y : center.z) / 100).toFixed(2);
     byId('section-live-slider').value = Math.round(Number(byId('section-live-position').value) * 100);
     byId('section-live-enabled').checked = true; applyLiveSection();
+  });
+  byId('section-invert').addEventListener('click', () => {
+    const before = sectionSnapshot();
+    state.sectionInverted = !state.sectionInverted;
+    byId('section-invert').classList.toggle('active', state.sectionInverted);
+    applyLiveSection();
+    pushSectionHistory(before, sectionSnapshot());
+    showToast('Lado visível do corte invertido.', 'ok');
   });
   byId('section-disable').addEventListener('click', () => { byId('section-live-enabled').checked = false; applyLiveSection(); });
 
@@ -1324,14 +2016,47 @@
 
   window.addEventListener('keydown', event => {
     const key = event.key.toLowerCase();
+    const editingField = Boolean(event.target && event.target.closest && event.target.closest('input,textarea,select,[contenteditable="true"]'));
+    if (state.sectionDrag && event.key === 'Escape') { finishSectionDrag(event, true); return; }
+    if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey && state.sectionUndo.length) {
+      event.preventDefault(); event.stopImmediatePropagation(); undoSection(); return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (key === 'y' || (key === 'z' && event.shiftKey)) && state.sectionRedo.length) {
+      event.preventDefault(); event.stopImmediatePropagation(); redoSection(); return;
+    }
     if ((event.ctrlKey || event.metaKey) && key === 'f') { event.preventDefault(); event.stopImmediatePropagation(); openOverlay('element-search'); return; }
     if ((event.ctrlKey || event.metaKey) && (key === 'k' || key === 'p')) { event.preventDefault(); event.stopImmediatePropagation(); openOverlay('command-palette'); return; }
+    if (!editingField && !event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat) {
+      const shortcuts = {
+        s: () => { setNavigationTool('select'); setTool('select'); },
+        o: () => setNavigationTool('orbit'),
+        p: () => setNavigationTool('pan'),
+        z: () => setNavigationTool('zoom'),
+        f: focusSelected,
+        m: () => setTool('move'),
+        r: () => setTool('rotate'),
+        c: () => setTool('section'),
+        i: isolateSelected,
+        h: hideSelected,
+        f1: () => openOverlay('help-overlay'),
+      };
+      if (shortcuts[key]) { event.preventDefault(); shortcuts[key](); return; }
+    }
     if (event.key === 'Escape') { closeOverlays(); if (editSession || state.measureStart || state.activeEditorRequest) cancelActiveAction(); }
     if (event.shiftKey && event.key === 'ArrowLeft') { event.preventDefault(); navigateWall(-1); }
     if (event.shiftKey && event.key === 'ArrowRight') { event.preventDefault(); navigateWall(1); }
     if (event.key === 'Enter' && document.querySelector('.command-overlay.open')) {
       const row = document.querySelector('.command-overlay.open .command-result.active'); if (row) row.click();
     }
+  }, true);
+
+  byId('btn-undo').addEventListener('click', event => {
+    if (!state.sectionUndo.length) return;
+    event.preventDefault(); event.stopImmediatePropagation(); undoSection();
+  }, true);
+  byId('btn-redo').addEventListener('click', event => {
+    if (!state.sectionRedo.length) return;
+    event.preventDefault(); event.stopImmediatePropagation(); redoSection();
   }, true);
 
   ['view-top', 'view-front', 'view-side', 'view-iso'].forEach(id => byId(id).addEventListener('click', event => {
@@ -1342,28 +2067,48 @@
   }, true));
 
   controls.addEventListener('change', updateQuickEdit);
-  window.addEventListener('editor:selection-changed', () => window.setTimeout(syncSelectionPanel, 0));
+  window.addEventListener('editor:selection-changed', event => {
+    handleSelectionChanged(event.detail || {});
+    window.setTimeout(() => {
+      syncSelectionPanel();
+      if (state.multiSelection.length > 1) renderMultiSelectionPanel();
+      rebuildDiagnosticDock();
+    }, 0);
+  });
   window.addEventListener('editor:model-rendered', event => {
     const detail = event.detail || {};
     if (state.isolatedWallId || state.connectedWallIds || state.hiddenWallIds.size || state.hiddenOpeningIds.size || state.highlightBlockCode) applyEditorVisibility();
-    updateProjectName(); rebuildCourseFilter(); rebuildCourseLabels(); rebuildDiagnosticMarkers(); updateStatusSelection();
+    updateProjectName(); updateProjectSnap(detail.data || {}); rebuildCourseFilter(); rebuildCourseLabels(); rebuildDiagnosticMarkers(); rebuildDiagnosticDock(); updateStatusSelection();
+    appendDiagnosticLog(detail.options && detail.options.preview ? 'Prévia geométrica atualizada.' : `Modelo renderizado · ${currentWalls.length} parede(s) · ${currentBlockCandidates.length} bloco(s).`);
     if (detail.options && detail.options.preview) showPreviewFeedback(detail.data || {}); else clearThreeGroup(previewFeedbackGroup);
-    if (byId('section-live-enabled').checked) applyLiveSection();
+    if (byId('section-live-enabled').checked) applyLiveSection(true);
     const wall = currentWall(); if (wall && byId('wall-inspector').classList.contains('open')) updateWallInspector(wall);
   });
 
   const statusObserver = new MutationObserver(() => {
     const message = byId('status-message').textContent.trim();
+    const processing = /carregando|processando|recalculando|atualizando|analisando|convertendo|prévia calculad/i.test(message);
+    byId('processing-indicator').classList.toggle('active', processing);
+    const processLabel = byId('processing-indicator').querySelector('b');
+    if (processLabel && processing) processLabel.textContent = message.split(/[.…]/)[0].slice(0, 28) || 'Processando';
     if (!message || message === 'Pronto' || /Prévia|Primeiro ponto|Recalculando|Atualizando/.test(message)) return;
+    appendDiagnosticLog(message.split('\n')[0]);
     if (/conclu|atualiz|modulad|restaurad|desfeit|refeit/i.test(message)) showToast(message.split('\n')[0], 'ok');
     else if (byId('status-message').classList.contains('status-error')) showToast(message.split('\n')[0], 'error');
   });
   statusObserver.observe(byId('status-message'), { childList: true, characterData: true, subtree: true, attributes: true });
 
+  const historyObserver = new MutationObserver(() => rebuildDiagnosticDock());
+  historyObserver.observe(byId('history-list'), { childList: true, characterData: true, subtree: true });
+  byId('dxf-path').addEventListener('input', updateProjectName);
+
   const toolbar = byId('top-toolbar');
-  const syncToolbarHeight = () => document.documentElement.style.setProperty('--topbar-height', `${toolbar.offsetHeight}px`);
-  new ResizeObserver(syncToolbarHeight).observe(toolbar); syncToolbarHeight();
+  const appBar = byId('app-bar');
+  const syncToolbarHeight = () => document.documentElement.style.setProperty('--topbar-height', `${appBar.offsetHeight + toolbar.offsetHeight}px`);
+  const chromeObserver = new ResizeObserver(syncToolbarHeight);
+  chromeObserver.observe(toolbar); chromeObserver.observe(appBar); syncToolbarHeight();
   setNavigationTool('select');
   updateProjectName();
+  updateProjectSnap({});
   updateStatusSelection();
 })();
