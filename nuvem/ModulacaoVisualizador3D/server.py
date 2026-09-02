@@ -97,6 +97,28 @@ _STATIC_CONTENT_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
 }
+_VIEWER_BUILD_FILES = ("index.html", "editor-shell.css", "editor-shell.js")
+
+
+def _viewer_build_id():
+    """Identifica exatamente os arquivos visuais servidos por este processo."""
+    digest = hashlib.sha256()
+    for filename in _VIEWER_BUILD_FILES:
+        digest.update(filename.encode("utf-8"))
+        with open(os.path.join(VIEWER_DIR, filename), "rb") as source:
+            digest.update(source.read())
+    return digest.hexdigest()[:16]
+
+
+def _versioned_viewer_index():
+    """Devolve o HTML com URLs únicas para impedir assets antigos do browser."""
+    with open(os.path.join(VIEWER_DIR, "index.html"), "rb") as source:
+        html = source.read().decode("utf-8")
+    version = _viewer_build_id()
+    for filename in ("editor-shell.css", "editor-shell.js"):
+        asset = "/viewer/{}".format(filename)
+        html = html.replace(asset, "{}?v={}".format(asset, version))
+    return html.encode("utf-8")
 
 
 def _file_cache_key(path, *options):
@@ -233,22 +255,35 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_bytes(self, body, content_type):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.end_headers()
         self.wfile.write(body)
 
     def _send_file(self, path, content_type):
         with open(path, "rb") as f:
             body = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_bytes(body, content_type)
 
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            return self._send_file(os.path.join(VIEWER_DIR, "index.html"), "text/html; charset=utf-8")
+            return self._send_bytes(_versioned_viewer_index(), "text/html; charset=utf-8")
+
+        if parsed.path == "/api/health":
+            return self._send_json(200, {
+                "status": "ok",
+                "build": _viewer_build_id(),
+            })
 
         if parsed.path.startswith("/viewer/"):
             rel = parsed.path[len("/viewer/"):]

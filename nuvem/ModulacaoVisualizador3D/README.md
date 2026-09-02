@@ -25,6 +25,13 @@ Dê duplo-clique em **`Visualizador de Modulação 3D.lnk`** (ou em
    para ver logs ou fechar/parar);
 3. abre `http://localhost:8080/` no navegador padrão automaticamente.
 
+Ao ser aberto pelo Revit, o launcher identifica a build dos arquivos visuais.
+Ele só reutiliza um servidor local se a build for exatamente a mesma; caso a
+porta 8080 pertença a uma versão antiga, inicia a versão atual em outra porta.
+O HTML também recebe URLs versionadas e cabeçalhos sem cache para impedir que
+o navegador misture a interface nova com CSS ou JavaScript de uma execução
+anterior.
+
 Para PARAR o servidor, feche a janela minimizada dele (ou use o
 Gerenciador de Tarefas, processo `py.exe`/`python.exe`).
 

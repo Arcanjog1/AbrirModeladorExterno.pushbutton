@@ -14,6 +14,8 @@ class EditorShellTests(unittest.TestCase):
         cls.css = (VIEWER / "editor-shell.css").read_text(encoding="utf-8")
         cls.javascript = (VIEWER / "editor-shell.js").read_text(encoding="utf-8")
         cls.inline_javascript = "\n".join(re.findall(r"<script>([\s\S]*?)</script>", cls.html))
+        cls.server = (ROOT / "server.py").read_text(encoding="utf-8")
+        cls.launcher = (ROOT.parent / "external_modelador.py").read_text(encoding="utf-8")
 
     def test_html_ids_are_unique(self):
         ids = re.findall(r'\bid="([^"]+)"', self.html)
@@ -170,6 +172,22 @@ class EditorShellTests(unittest.TestCase):
             self.inline_javascript,
         )
         self.assertIn("camera.lookAt(controls.target)", self.inline_javascript)
+
+    def test_revit_launch_rejects_stale_servers_and_browser_assets(self):
+        for feature in (
+            "_viewer_build_id",
+            "_versioned_viewer_index",
+            'parsed.path == "/api/health"',
+            "no-store, no-cache, must-revalidate",
+        ):
+            self.assertIn(feature, self.server)
+        for feature in (
+            "_visualizer_build_id",
+            "_server_build_for_port",
+            "_compatible_server_port",
+            "&build={}",
+        ):
+            self.assertIn(feature, self.launcher)
 
 
 if __name__ == "__main__":

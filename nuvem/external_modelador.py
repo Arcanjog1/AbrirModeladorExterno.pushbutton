@@ -28,6 +28,7 @@ Revit neste momento, entao a verificacao ficou limitada a
 core/capture_export.py). Validar na pratica (escolher um CAD real,
 conferir o JSON gerado) antes de confiar no resultado.
 """
+import hashlib
 import json
 import os
 import sys
@@ -536,6 +537,48 @@ def _is_server_running(port=8080):
         s.close()
 
 
+def _visualizer_build_id(vis_dir):
+    digest = hashlib.sha256()
+    viewer_dir = os.path.join(vis_dir, "viewer")
+    for filename in ("index.html", "editor-shell.css", "editor-shell.js"):
+        digest.update(filename.encode("utf-8"))
+        with open(os.path.join(viewer_dir, filename), "rb") as source:
+            digest.update(source.read())
+    return digest.hexdigest()[:16]
+
+
+def _server_build_for_port(port):
+    try:
+        try:
+            from urllib.request import urlopen
+        except ImportError:
+            from urllib2 import urlopen
+        response = urlopen("http://127.0.0.1:{}/api/health".format(port), timeout=0.5)
+        raw = response.read()
+        if not isinstance(raw, str):
+            raw = raw.decode("utf-8")
+        return json.loads(raw).get("build")
+    except Exception:
+        return None
+
+
+def _compatible_server_port(preferred_port, build_id):
+    """Reusa somente o servidor da mesma build; nunca uma instância antiga."""
+    if not _is_server_running(preferred_port):
+        return preferred_port
+    if _server_build_for_port(preferred_port) == build_id:
+        return preferred_port
+
+    first = 18000 + (int(build_id[:8], 16) % 10000)
+    for offset in range(100):
+        candidate = 18000 + ((first - 18000 + offset) % 10000)
+        if not _is_server_running(candidate):
+            return candidate
+        if _server_build_for_port(candidate) == build_id:
+            return candidate
+    return None
+
+
 def _launch_visualizer(json_path, port=8080):
     import subprocess
     import time
@@ -551,6 +594,15 @@ def _launch_visualizer(json_path, port=8080):
             "Verifique se o visualizador esta' na pasta em nuvem do botao: "
             "'AbrirModeladorExterno.pushbutton\\nuvem\\ModulacaoVisualizador3D' "
             "ou configure MODULACAO_VISUALIZADOR_PATH.",
+            title="Modelador Externo",
+        )
+        return False
+
+    build_id = _visualizer_build_id(vis_dir)
+    port = _compatible_server_port(port, build_id)
+    if port is None:
+        forms.alert(
+            "Nao foi encontrada uma porta local livre para abrir a versao atual do visualizador.",
             title="Modelador Externo",
         )
         return False
@@ -582,8 +634,15 @@ def _launch_visualizer(json_path, port=8080):
 
         for _ in range(25):
             time.sleep(0.1)
-            if _is_server_running(port):
+            if _server_build_for_port(port) == build_id:
                 break
+
+    if _server_build_for_port(port) != build_id:
+        forms.alert(
+            "O servidor local iniciou, mas nao confirmou a versao atual da interface.",
+            title="Modelador Externo",
+        )
+        return False
 
     abs_path = os.path.abspath(json_path)
     try:
@@ -591,7 +650,7 @@ def _launch_visualizer(json_path, port=8080):
     except AttributeError:
         quote_fn = lambda s: s.replace(" ", "%20")
     encoded_path = quote_fn(abs_path)
-    url = "http://localhost:{}/?capture={}".format(port, encoded_path)
+    url = "http://localhost:{}/?capture={}&build={}".format(port, encoded_path, build_id)
 
     try:
         import webbrowser
