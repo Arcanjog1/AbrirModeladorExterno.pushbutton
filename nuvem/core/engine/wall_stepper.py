@@ -85,7 +85,7 @@ __all__ = [
     "_layout_internal_joint_positions_cm", "_count_joint_coincidences_cm",
     "_layout_min_joint_stagger_cm", "MIN_JOINT_STAGGER_TARGET_CM",
     "OPENING_ALIGNED_EXEMPT_CODES", "_layout_compensator_run_excess",
-    "_block_void_offsets_cm", "_layout_void_positions_cm", "_count_void_alignment_cm",
+    "_block_void_offsets_cm", "_layout_void_positions_cm", "_layout_b34_small_void_positions_cm", "_count_void_alignment_cm",
     "_half_block_leading_layout", "_pier_forced_bypass_layouts",
     "_pier_layout_avoiding_joints", "_place_pier_layout",
     "_candidate_extent_on_wall_axis", "_node_candidates_by_index",
@@ -3029,6 +3029,23 @@ def _layout_void_positions_cm(layout, catalog, seg_start_cm):
     return positions
 
 
+def _layout_b34_small_void_positions_cm(layout, catalog, seg_start_cm):
+    """Centros absolutos do vão menor dos B34 de ``layout``."""
+    positions = []
+    for code, start_cm, _end_cm in layout:
+        if code != MID_WALL_BLOCK_CODE:
+            continue
+        entry = catalog.get(code) or {}
+        cell = _block_smaller_cell(entry)
+        length_cm = entry.get("length_cm")
+        if cell is None or not length_cm:
+            continue
+        positions.append(
+            seg_start_cm + start_cm + length_cm / 2.0 + _ft_to_cm(cell["center_local"][0])
+        )
+    return positions
+
+
 def _count_void_alignment_cm(positions_cm, target_positions_cm,
                              tolerance_cm=VOID_ALIGNMENT_TOLERANCE_CM):
     """Quantas posicoes de `positions_cm` caem a MENOS de `tolerance_cm` de
@@ -3333,6 +3350,7 @@ def _pier_layout_avoiding_joints(pier_cm, catalog, leading_joint_cm, trailing_jo
                                  seg_start_cm, avoid_positions_cm,
                                  allow_compensators=BLOCK_COMPENSATORS_ENABLED_BY_DEFAULT,
                                  target_void_positions_cm=None,
+                                 required_b34_small_void_positions_cm=None,
                                  leading_is_open=True, trailing_is_open=True):
     """Como `_pier_ordered_layout`, mas escolhe entre variacoes do mesmo
     trecho (mudando so' o PRIMEIRO bloco, via `first_code`) pela AMARRACAO
@@ -3406,7 +3424,17 @@ def _pier_layout_avoiding_joints(pier_cm, catalog, leading_joint_cm, trailing_jo
                                     trailing_open_override=trailing_is_open)
     if baseline is None:
         return None
-    if len(baseline) <= 1 or (not avoid_positions_cm and not target_void_positions_cm):
+    required_b34_voids = sorted(required_b34_small_void_positions_cm or [])
+
+    def _matches_required_b34_voids(layout):
+        if not required_b34_voids:
+            return True
+        actual = _layout_b34_small_void_positions_cm(layout, catalog, seg_start_cm)
+        return all(any(abs(position - wanted) <= VOID_ALIGNMENT_TOLERANCE_CM
+                       for position in actual) for wanted in required_b34_voids)
+
+    if (len(baseline) <= 1 or (not avoid_positions_cm and not target_void_positions_cm)) \
+            and not required_b34_voids:
         return baseline
 
     def _score(layout):
@@ -3445,8 +3473,8 @@ def _pier_layout_avoiding_joints(pier_cm, catalog, leading_joint_cm, trailing_jo
             stagger, MIN_JOINT_STAGGER_TARGET_CM)
         return (comp_excess, joint_coinc, -trava, -align)
 
-    best = baseline
-    best_score = _score(baseline)
+    best = baseline if _matches_required_b34_voids(baseline) else None
+    best_score = _score(best) if best is not None else None
     max_align = len(target_void_positions_cm) if target_void_positions_cm else 0
     perfect_score = (0, 0, -MIN_JOINT_STAGGER_TARGET_CM, -max_align)
     if best_score == perfect_score:
@@ -3465,7 +3493,7 @@ def _pier_layout_avoiding_joints(pier_cm, catalog, leading_joint_cm, trailing_jo
                                                  trailing_is_open=trailing_is_open)
         if forced_half is not None:
             forced_score = _score(forced_half)
-            if forced_score < best_score:
+            if _matches_required_b34_voids(forced_half) and (best_score is None or forced_score < best_score):
                 best, best_score = forced_half, forced_score
                 if best_score == perfect_score:
                     return best
@@ -3486,7 +3514,7 @@ def _pier_layout_avoiding_joints(pier_cm, catalog, leading_joint_cm, trailing_jo
                                            allow_compensators=allow_compensators,
                                            leading_is_open=leading_is_open, trailing_is_open=trailing_is_open):
         alt_score = _score(alt)
-        if alt_score < best_score:
+        if _matches_required_b34_voids(alt) and (best_score is None or alt_score < best_score):
             best, best_score = alt, alt_score
             if best_score == perfect_score:
                 return best
@@ -3510,7 +3538,7 @@ def _pier_layout_avoiding_joints(pier_cm, catalog, leading_joint_cm, trailing_jo
         if alt is None:
             continue
         alt_score = _score(alt)
-        if alt_score < best_score:
+        if _matches_required_b34_voids(alt) and (best_score is None or alt_score < best_score):
             best, best_score = alt, alt_score
             if best_score == perfect_score:
                 break
@@ -3908,6 +3936,10 @@ def solve_wall_free_fill(wall_idx, walls_to_create, nodes, end_to_node, openings
     # os vazios entre fiadas (mesma secao 6, ver _pier_layout_avoiding_joints
     # e _layout_void_positions_cm). Pedido explicito do usuario (2026-08-21).
     course_a_void_positions_cm = []
+    # Vãos MENORES dos B34 da Fiada A. Ao resolver a Fiada B, estes são
+    # obrigatórios: B34 de preenchimento comum só é válido se travar essa
+    # célula assimétrica com a fiada oposta.
+    course_a_b34_small_void_positions_cm = []
 
     def get_jamb(opening_index, side):
         key = (opening_index, side)
@@ -4120,6 +4152,9 @@ def solve_wall_free_fill(wall_idx, walls_to_create, nodes, end_to_node, openings
                         course_a_void_positions_cm.extend(
                             _layout_void_positions_cm(layout, catalog, seg_start_cm)
                         )
+                        course_a_b34_small_void_positions_cm.extend(
+                            _layout_b34_small_void_positions_cm(layout, catalog, seg_start_cm)
+                        )
                 else:
                     # Fiada B (todas as variantes): tenta ALINHAR os vazios
                     # internos com os ja' usados por QUALQUER variante da
@@ -4134,6 +4169,12 @@ def solve_wall_free_fill(wall_idx, walls_to_create, nodes, end_to_node, openings
                         course_a_joint_positions_cm + own_family_joint_positions_cm,
                         allow_compensators=allow_compensators,
                         target_void_positions_cm=course_a_void_positions_cm,
+                        required_b34_small_void_positions_cm=(
+                            [position for position in course_a_b34_small_void_positions_cm
+                             if seg_start_cm - VOID_ALIGNMENT_TOLERANCE_CM <= position
+                             <= seg_end_cm + VOID_ALIGNMENT_TOLERANCE_CM]
+                            if kind_left.startswith("OPENING") or kind_right.startswith("OPENING") else []
+                        ),
                         leading_is_open=leading_is_open, trailing_is_open=trailing_is_open,
                     )
                     if layout:

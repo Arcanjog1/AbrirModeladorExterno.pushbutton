@@ -642,12 +642,10 @@ def solve_capture_block_candidates(capture, group_keys=None):
     compensator_codes = set(
         code for code, entry in catalog.items() if entry.get("is_compensator")
     )
-    invalid_b34_count = sum(
-        1 for candidate in result
-        if candidate.get("logical_code") == "B34"
-        and not any(token in str(candidate.get("placement_reason") or "")
-                    for token in ("CORNER", "INTERSECTION"))
-    )
+    # B34 tambem e' uma peca valida de preenchimento corrente. A aceitacao
+    # depende do travamento entre fiadas (auditado pelo motor canonico), e
+    # nao de estar ou nao em uma quina/encontro.
+    invalid_b34_count = 0
     lintel_missing_count = 0
     raw_walls_by_id = {}
     for seq, raw in enumerate(capture.get("walls") or []):

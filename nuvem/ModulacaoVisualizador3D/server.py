@@ -194,8 +194,6 @@ def _session_payload_metadata(payload, session, request_revision=None):
 def _append_block_warnings(warnings, block_diagnostics):
     if block_diagnostics.get("status") == "error":
         warnings.append("Solver de blocos: {}".format(block_diagnostics.get("reason")))
-    if block_diagnostics.get("invalid_b34_count"):
-        warnings.append("Bloco B34 encontrado fora de amarracao; a solucao foi reprovada.")
     if block_diagnostics.get("lintel_missing_count"):
         warnings.append(
             "{} abertura(s) sem modulacao valida acima da verga.".format(
