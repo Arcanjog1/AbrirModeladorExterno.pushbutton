@@ -53,8 +53,10 @@ Rotas:
         uma Wall ou uma lista de Walls, usando catálogo/regras do projeto.
 """
 
+import copy
 import json
 import hashlib
+import math
 import os
 import sys
 import threading
@@ -98,6 +100,7 @@ _SEGMENT_CACHE = OrderedDict()
 _CAPTURE_MODELS = OrderedDict()
 _CAPTURE_SOLUTIONS = OrderedDict()
 _EDITOR_SESSIONS = OrderedDict()
+_PROPOSAL_SETS = OrderedDict()
 _CACHE_LIMIT = 4
 
 _STATIC_CONTENT_TYPES = {
@@ -169,6 +172,7 @@ def _store_capture_model(cache_key, capture, candidates=None, diagnostics=None):
     # histórico e a geração atual do editor, enquanto os caches continuam
     # atendendo o carregamento de arquivos sem editar o modelo.
     _remember(_EDITOR_SESSIONS, model_id, EditorSession(capture, candidates, diagnostics))
+    _PROPOSAL_SETS.pop(model_id, None)
     if capture.get("walls"):
         worker = threading.Thread(target=warm_dependency_graph, args=(capture,))
         worker.daemon = True
@@ -447,6 +451,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_history_move(1)
         if parsed.path == "/api/calculate-modulation":
             return self._handle_calculate_modulation()
+        if parsed.path == "/api/proposals":
+            return self._handle_proposals()
+        if parsed.path == "/api/preview-proposal":
+            return self._handle_preview_proposal()
+        if parsed.path == "/api/apply-proposal":
+            return self._handle_apply_proposal()
 
         return self._send_json(404, {"error": "rota desconhecida"})
 
@@ -891,6 +901,235 @@ class Handler(BaseHTTPRequestHandler):
                 _remember(_LOAD_CACHE, cache_key, cached_full)
                 break
         return self._send_json(200, payload)
+
+    @staticmethod
+    def _proposal_quality(diagnostics, action):
+        """Conta apenas falhas da componente que uma proposta pode alterar."""
+        wanted = set(str(value) for value in (
+            action.get("affected_wall_ids") or action.get("source_wall_ids") or []
+        ) if value is not None)
+        statuses = diagnostics.get("wall_statuses") or []
+        if wanted:
+            statuses = [status for status in statuses if set(
+                str(value) for value in (status.get("source_wall_ids") or [])
+            ) & wanted]
+        failed = [status for status in statuses if status.get("ok") is False]
+        return {
+            "failed_walls": len(failed),
+            "codes": sorted(set(str(status.get("code") or "MODULACAO") for status in failed)),
+        }
+
+    @staticmethod
+    def _proposal_opening_axis(capture, opening):
+        """Eixo do host, sem depender de metadados apenas do viewer."""
+        host_id = str(opening.get("host_wall_id") or "")
+        for raw in capture.get("walls") or []:
+            if host_id and host_id not in raw_wall_ids(raw):
+                continue
+            start = raw.get("start_cm") or raw.get("start") or []
+            end = raw.get("end_cm") or raw.get("end") or []
+            if len(start) < 2 or len(end) < 2:
+                continue
+            dx, dy = float(end[0]) - float(start[0]), float(end[1]) - float(start[1])
+            length = math.hypot(dx, dy)
+            if length > 1e-6:
+                return dx / length, dy / length
+        return None
+
+    def _proposal_candidates(self, capture, opening_id=None, wall_id=None, project=False):
+        """Gera mudanças pequenas e reversíveis, nunca as aplica ao modelo."""
+        rows = []
+        openings = capture.get("openings") or []
+        if opening_id:
+            openings = [item for item in openings if str(item.get("element_id") or "") == str(opening_id)]
+        elif wall_id:
+            target = str(wall_id)
+            openings = [item for item in openings if str(item.get("host_wall_id") or "") == target]
+        elif not project:
+            openings = openings[:1]
+        else:
+            openings = openings[:3]
+
+        for opening in openings:
+            axis = self._proposal_opening_axis(capture, opening)
+            center = opening.get("center_cm") or []
+            if axis is None or len(center) < 2:
+                continue
+            for delta_cm in (-5.0, -2.0, 2.0, 5.0):
+                target = [center[0] + axis[0] * delta_cm, center[1] + axis[1] * delta_cm]
+                trial, action = move_capture_opening(capture, opening.get("element_id"), target)
+                if action.get("accepted"):
+                    action.update({
+                        "proposal_kind": "move_opening",
+                        "proposal_title": "Mover abertura {} {}{:.0f} cm".format(
+                            opening.get("element_id"), "+" if delta_cm > 0 else "", delta_cm
+                        ),
+                        "proposal_explanation": "Desloca a abertura no próprio eixo para liberar a modulação da jamba.",
+                        "impact_cm": abs(delta_cm),
+                    })
+                    rows.append((trial, action))
+            for increment_cm in (2.0, 5.0):
+                trial, action = resize_capture_opening(
+                    capture, opening.get("element_id"),
+                    float(opening.get("width_cm") or 0.0) + increment_cm,
+                )
+                if action.get("accepted"):
+                    action.update({
+                        "proposal_kind": "widen_opening",
+                        "proposal_title": "Aumentar abertura {} em {:.0f} cm".format(
+                            opening.get("element_id"), increment_cm
+                        ),
+                        "proposal_explanation": "Amplia o vão dentro da Wall hospedeira e revalida as fiadas afetadas.",
+                        "impact_cm": increment_cm,
+                    })
+                    rows.append((trial, action))
+
+        target_walls = []
+        if wall_id:
+            target_walls = [item for item in (capture.get("walls") or []) if str(wall_id) in raw_wall_ids(item)]
+        elif opening_id:
+            opening = next((item for item in (capture.get("openings") or [])
+                            if str(item.get("element_id") or "") == str(opening_id)), None)
+            if opening:
+                target_walls = [item for item in (capture.get("walls") or [])
+                                if str(opening.get("host_wall_id") or "") in raw_wall_ids(item)]
+        elif project:
+            target_walls = list(capture.get("walls") or [])[:2]
+
+        for wall in target_walls[:2]:
+            start = wall.get("start_cm") or wall.get("start") or []
+            end = wall.get("end_cm") or wall.get("end") or []
+            if len(start) < 2 or len(end) < 2:
+                continue
+            dx, dy = float(end[0]) - float(start[0]), float(end[1]) - float(start[1])
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                continue
+            ux, uy = dx / length, dy / length
+            for increment_cm in (2.0, 5.0):
+                new_end = [end[0] + ux * increment_cm, end[1] + uy * increment_cm]
+                trial, action = edit_capture_wall(
+                    capture, wall.get("id") or wall.get("element_id"), start, new_end,
+                    wall.get("thickness_cm") or wall.get("width_cm"), wall.get("height_cm"),
+                )
+                if action.get("accepted"):
+                    action.update({
+                        "proposal_kind": "extend_wall",
+                        "proposal_title": "Estender parede {} em {:.0f} cm".format(
+                            wall.get("id") or wall.get("element_id"), increment_cm
+                        ),
+                        "proposal_explanation": "Sugestão manual para o extremo da Wall; revise cotas, ambiente e elementos hospedados antes de aplicar.",
+                        "impact_cm": increment_cm,
+                        "requires_manual_review": True,
+                    })
+                    rows.append((trial, action))
+        return rows
+
+    def _handle_proposals(self):
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        model_id = str(body.get("model_id") or "")
+        session = _EDITOR_SESSIONS.get(model_id)
+        if session is None:
+            return self._send_json(400, {"error": "Modelo nao encontrado; recarregue a captura."})
+        base_revision, state = session.current()
+        if body.get("base_revision") is not None and int(body.get("base_revision")) != base_revision:
+            return self._send_json(409, {"error": "O modelo mudou; gere as propostas novamente.", "revision": base_revision})
+
+        capture = state["capture"]
+        baseline = {"failed_walls": 0, "codes": []}
+        records, visible = {}, []
+        for index, (trial, action) in enumerate(self._proposal_candidates(
+                capture, body.get("opening_id"), body.get("wall_id"), bool(body.get("project")))):
+            try:
+                candidates, diagnostics, performance = self._recalculate_capture_edit(model_id, trial, action)
+            except Exception:
+                continue
+            candidate_baseline = self._proposal_quality(state["diagnostics"], action)
+            quality = self._proposal_quality(diagnostics, action)
+            # A proposta pode manter uma pendência já existente, mas jamais
+            # criar mais paredes reprovadas na componente afetada.
+            if quality["failed_walls"] > candidate_baseline["failed_walls"]:
+                continue
+            proposal_id = "p-{}-{}".format(base_revision, index)
+            action["proposal_id"] = proposal_id
+            action["history_label"] = "Aplicar proposta: {}".format(action.get("proposal_title"))
+            record = {
+                "capture": trial, "action": action, "candidates": candidates,
+                "diagnostics": diagnostics, "quality": quality,
+            }
+            records[proposal_id] = record
+            visible.append({
+                "id": proposal_id,
+                "kind": action.get("proposal_kind"),
+                "title": action.get("proposal_title"),
+                "explanation": action.get("proposal_explanation"),
+                "impact_cm": action.get("impact_cm", 0),
+                "requires_manual_review": bool(action.get("requires_manual_review")),
+                "affected_wall_ids": action.get("affected_wall_ids") or [],
+                "affected_courses": action.get("affected_course_indices") or [],
+                "conflicts_before": candidate_baseline["failed_walls"],
+                "conflicts_after": quality["failed_walls"],
+                "codes_after": quality["codes"],
+                "blocks_added": performance.get("blocks_added", 0),
+                "blocks_removed": performance.get("blocks_removed", 0),
+                "applicable": True,
+            })
+        visible.sort(key=lambda item: (
+            item["conflicts_after"], item["impact_cm"], item["requires_manual_review"], item["title"]
+        ))
+        _remember(_PROPOSAL_SETS, model_id, {"revision": base_revision, "items": records})
+        if visible:
+            baseline = {
+                "failed_walls": min(item["conflicts_before"] for item in visible),
+                "codes": sorted(set(code for item in visible for code in item.get("codes_after") or [])),
+            }
+        return self._send_json(200, {
+            "model_id": model_id, "revision": base_revision, "baseline": baseline,
+            "proposals": visible, "project": bool(body.get("project")),
+        })
+
+    def _proposal_record_for_request(self, body):
+        model_id = str(body.get("model_id") or "")
+        session = _EDITOR_SESSIONS.get(model_id)
+        proposal_set = _PROPOSAL_SETS.get(model_id)
+        if session is None or proposal_set is None:
+            return None, None, None, (400, {"error": "Proposta expirada; gere-a novamente."})
+        revision, _state = session.current()
+        if revision != proposal_set.get("revision") or (body.get("base_revision") is not None and int(body.get("base_revision")) != revision):
+            return None, None, None, (409, {"error": "O modelo mudou; gere as propostas novamente.", "revision": revision})
+        record = (proposal_set.get("items") or {}).get(str(body.get("proposal_id") or ""))
+        if record is None:
+            return None, None, None, (404, {"error": "Proposta nao encontrada; gere as propostas novamente."})
+        return model_id, session, record, None
+
+    def _handle_preview_proposal(self):
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        model_id, session, record, error = self._proposal_record_for_request(body)
+        if error:
+            return self._send_json(error[0], error[1])
+        return self._preview_capture_edit(
+            model_id, copy.deepcopy(record["capture"]), copy.deepcopy(record["action"]),
+            time.perf_counter(), session, session.revision, body.get("revision"),
+        )
+
+    def _handle_apply_proposal(self):
+        try:
+            body = self._read_json_body()
+        except Exception:
+            return self._send_json(400, {"error": "JSON invalido no corpo da requisicao"})
+        model_id, session, record, error = self._proposal_record_for_request(body)
+        if error:
+            return self._send_json(error[0], error[1])
+        return self._commit_capture_edit(
+            model_id, copy.deepcopy(record["capture"]), copy.deepcopy(record["action"]),
+            time.perf_counter(), session, session.revision, body.get("revision"),
+        )
 
     def _handle_edit_wall(self):
         try:

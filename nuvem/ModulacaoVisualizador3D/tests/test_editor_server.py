@@ -111,6 +111,18 @@ class TestEditorServer(unittest.TestCase):
         self.assertEqual({"new-w1", "w2"}, {item["id"] for item in merged["block_candidates"]})
         self.assertFalse(merged.get("incremental_patch"))
 
+    def test_proposal_generator_only_creates_reversible_edit_candidates(self):
+        handler = server.Handler.__new__(server.Handler)
+        rows = handler._proposal_candidates(self.capture, opening_id="P1")
+
+        self.assertTrue(rows)
+        actions = [action for _capture, action in rows]
+        self.assertTrue(all(action["accepted"] for action in actions))
+        self.assertIn("move_opening", {action["proposal_kind"] for action in actions})
+        self.assertIn("widen_opening", {action["proposal_kind"] for action in actions})
+        self.assertIn("extend_wall", {action["proposal_kind"] for action in actions})
+        self.assertTrue(all(action.get("impact_cm", 0) > 0 for action in actions))
+
 
 if __name__ == "__main__":
     unittest.main()

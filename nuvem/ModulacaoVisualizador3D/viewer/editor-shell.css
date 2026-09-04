@@ -268,13 +268,22 @@ button, input, select, textarea { font-family: "Segoe UI Variable", "Segoe UI", 
 #section-panel input, #section-panel select { color: var(--editor-text); background: var(--editor-bg); border-color: var(--editor-border); }
 #diagnostics-panel.diagnostic-dock { left: 50px !important; right: 8px !important; top: auto !important; bottom: var(--statusbar-height) !important; width: auto !important; height: 190px; min-height: 116px; max-height: 48vh; padding: 7px 9px; resize: vertical; border-radius: 5px 5px 0 0 !important; }
 #diagnostics-panel.diagnostic-dock .panel-titlebar { cursor: ns-resize; }
-#diagnostics-content, #diagnostics-conflicts, #diagnostics-history, #diagnostics-log, #diagnostics-performance { padding: 8px 2px; white-space: pre-wrap; color: var(--editor-muted); font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px; line-height: 1.5; }
+#diagnostics-content, #diagnostics-conflicts, #diagnostics-proposals, #diagnostics-history, #diagnostics-log, #diagnostics-performance { padding: 8px 2px; white-space: pre-wrap; color: var(--editor-muted); font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px; line-height: 1.5; }
 .diagnostic-tabs { display: flex; align-items: center; gap: 2px; margin-top: 4px; border-bottom: 1px solid var(--editor-border); }
 .diagnostic-tabs button { height: 26px; margin: 0; padding: 0 10px; color: var(--editor-muted); background: transparent; border: 0; border-bottom: 2px solid transparent; border-radius: 0; font-size: 9px; }
 .diagnostic-tabs button:hover { color: var(--editor-text); background: var(--editor-hover); }
 .diagnostic-tabs button.active { color: var(--editor-text); border-bottom-color: var(--editor-accent); }
 .diagnostic-tab-content { display: none; max-height: calc(48vh - 75px); overflow: auto; }
 .diagnostic-tab-content.active { display: block; }
+.proposal-toolbar { display: flex; gap: 6px; align-items: center; padding: 7px 0 2px; }
+.proposal-toolbar button { min-height: 25px; font-size: 10px; }
+.proposal-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 8px; margin: 5px 0; border: 1px solid var(--editor-border); border-left: 3px solid var(--editor-accent); background: color-mix(in srgb, var(--editor-panel) 88%, #3b82f6 12%); border-radius: 4px; white-space: normal; }
+.proposal-card.manual-review { border-left-color: #f59e0b; }
+.proposal-card strong, .proposal-card small { display: block; }
+.proposal-card small { color: var(--editor-muted); margin-top: 3px; }
+.proposal-meta { margin-top: 5px; color: var(--editor-text); font-family: inherit; font-size: 9px; }
+.proposal-actions { display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
+.proposal-actions button { min-width: 76px; min-height: 24px; font-size: 9px; }
 .diagnostic-filters { display: grid; grid-template-columns: 130px 150px minmax(160px, 1fr); gap: 5px; padding: 7px 0 3px; }
 .diagnostic-filters input, .diagnostic-filters select { height: 27px; margin: 0; padding: 0 7px; color: var(--editor-text); background: var(--editor-bg); border: 1px solid var(--editor-border); border-radius: 3px; font-size: 9px; }
 .diagnostic-problem { display: grid; grid-template-columns: minmax(240px, 1fr) auto; gap: 8px; padding: 7px 3px; border-top: 1px solid var(--editor-border); }

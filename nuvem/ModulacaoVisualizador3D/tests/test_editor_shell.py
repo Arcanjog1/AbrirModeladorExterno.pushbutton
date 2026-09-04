@@ -170,6 +170,19 @@ class EditorShellTests(unittest.TestCase):
         ):
             self.assertIn(feature, self.html + self.javascript + self.server)
 
+    def test_reviewed_geometry_proposals_are_available_without_silent_apply(self):
+        for control in (
+            "btn-proposals", "btn-generate-proposals", "btn-generate-project-proposals",
+            "btn-discard-proposal", "diagnostics-proposals",
+        ):
+            self.assertIn(f'id="{control}"', self.html)
+        for feature in (
+            "/api/proposals", "/api/preview-proposal", "/api/apply-proposal",
+            "generateProposals", "previewProposal", "applyProposal", "discardProposalPreview",
+            "requires_manual_review", "proposal-card",
+        ):
+            self.assertIn(feature, self.html + self.css + self.javascript + self.server)
+
     def test_section_can_invert_its_visible_side(self):
         self.assertIn('id="section-invert"', self.html)
         self.assertIn("sectionInverted", self.javascript)

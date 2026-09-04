@@ -263,6 +263,7 @@
       </div>
       <div class="toolbar-cluster" data-cluster-label="Análise">
         <button id="btn-wall-mode" title="Inspeção parede por parede">Vista por parede</button>
+        <button id="btn-proposals" title="Gerar propostas de correção para a seleção">Propostas</button>
         <button id="btn-isolate-selected" title="Isolar elemento ou parede">Isolar</button>
         <button id="btn-hide-selected" title="Ocultar elemento selecionado">Ocultar</button>
         <button id="btn-show-all" title="Restaurar toda a visibilidade">Mostrar tudo</button>
@@ -356,6 +357,7 @@
       <button data-context-action="dependencies">Mostrar dependências</button>
       <button data-context-action="highlight-type">Destacar tipo de bloco</button>
       <button data-context-action="diagnostic">Diagnóstico</button>
+      <button data-context-action="proposals">Propostas de correção</button>
       <button data-context-action="hide">Ocultar</button>
     </div>
     <div id="section-panel" class="editor-floating-panel">
@@ -369,8 +371,9 @@
     </div>
     <div id="diagnostics-panel" class="editor-floating-panel diagnostic-dock">
       <div class="panel-titlebar"><strong>Diagnóstico do modelo</strong><span class="panel-window-controls"><button type="button" data-panel-minimize="diagnostics-panel">—</button><button type="button" data-panel-close="diagnostics-panel">×</button></span></div>
-      <div class="diagnostic-tabs" role="tablist"><button type="button" class="active" data-diagnostic-tab="problems">Problemas</button><button type="button" data-diagnostic-tab="element">Diagnóstico</button><button type="button" data-diagnostic-tab="performance">Desempenho</button><button type="button" data-diagnostic-tab="history">Histórico</button><button type="button" data-diagnostic-tab="log">Log</button><button type="button" data-diagnostic-tab="dependencies">Dependências</button><button type="button" data-diagnostic-tab="commands">Comandos</button></div>
+      <div class="diagnostic-tabs" role="tablist"><button type="button" class="active" data-diagnostic-tab="problems">Problemas</button><button type="button" data-diagnostic-tab="proposals">Propostas</button><button type="button" data-diagnostic-tab="element">Diagnóstico</button><button type="button" data-diagnostic-tab="performance">Desempenho</button><button type="button" data-diagnostic-tab="history">Histórico</button><button type="button" data-diagnostic-tab="log">Log</button><button type="button" data-diagnostic-tab="dependencies">Dependências</button><button type="button" data-diagnostic-tab="commands">Comandos</button></div>
       <div class="diagnostic-tab-content active" data-diagnostic-content="problems"><div class="diagnostic-filters"><select id="diagnostic-filter-severity"><option value="">Toda gravidade</option><option value="error">Erros</option><option value="warning">Alertas</option></select><select id="diagnostic-filter-wall"><option value="">Todas as paredes</option></select><input type="search" id="diagnostic-filter-text" placeholder="Filtrar problemas…"></div><div id="diagnostics-conflicts">Nenhum conflito analisado.</div></div>
+      <div class="diagnostic-tab-content" data-diagnostic-content="proposals"><div class="proposal-toolbar"><button type="button" id="btn-generate-proposals">Gerar para seleção</button><button type="button" id="btn-generate-project-proposals" class="secondary">Analisar projeto</button><button type="button" id="btn-discard-proposal" class="secondary" disabled>Descartar prévia</button></div><div id="diagnostics-proposals">Selecione uma parede ou abertura e gere propostas. Nenhuma alteração é aplicada sem confirmação.</div></div>
       <div class="diagnostic-tab-content" data-diagnostic-content="element"><div id="diagnostics-content">Selecione uma parede, abertura ou bloco para inspecionar.</div></div>
       <div class="diagnostic-tab-content" data-diagnostic-content="performance"><div id="diagnostics-performance">Aguardando a primeira medição.</div></div>
       <div class="diagnostic-tab-content" data-diagnostic-content="history"><div id="diagnostics-history">Nenhuma edição nesta sessão.</div></div>

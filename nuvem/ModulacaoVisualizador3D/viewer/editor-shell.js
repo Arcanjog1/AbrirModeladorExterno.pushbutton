@@ -36,6 +36,9 @@
     dragFps: null,
     fpsActive: false,
     dependencyGraph: null,
+    proposals: [],
+    proposalPreviewId: null,
+    proposalRequest: null,
   };
 
   window.editorRealtimeEnabled = true;
@@ -102,7 +105,7 @@
 
   function decorateToolbars() {
     const idIcons = {
-      'btn-project-panel': 'project', 'btn-wall-mode': 'wall', 'btn-isolate-selected': 'isolate',
+      'btn-project-panel': 'project', 'btn-wall-mode': 'wall', 'btn-proposals': 'diagnostic', 'btn-isolate-selected': 'isolate',
       'btn-hide-selected': 'hide', 'btn-show-all': 'show', 'btn-diagnostic-mode': 'diagnostic',
       'view-top': 'top', 'view-front': 'front', 'view-side': 'side', 'view-iso': 'iso',
       'view-extents': 'extents', 'btn-undo': 'undo', 'btn-redo': 'redo', 'view-selected': 'focus',
@@ -371,6 +374,135 @@
   function endFpsMeasurement() {
     state.fpsActive = false;
     renderPerformance();
+  }
+
+  function openDiagnosticTab(name) {
+    const button = byId('diagnostics-panel').querySelector(`[data-diagnostic-tab="${name}"]`);
+    if (button) button.click();
+  }
+
+  function proposalTarget() {
+    const wall = currentWall();
+    const opening = selectedObject && selectedObject.userData.kind === 'opening'
+      ? selectedObject.userData.opening : null;
+    return {
+      opening_id: opening && opening.element_id,
+      wall_id: wall && wall.id,
+    };
+  }
+
+  function renderProposalDock() {
+    const container = byId('diagnostics-proposals');
+    const discard = byId('btn-discard-proposal');
+    if (!container || !discard) return;
+    discard.disabled = !state.proposalPreviewId;
+    container.innerHTML = '';
+    if (!state.proposals.length) {
+      container.textContent = 'Selecione uma parede ou abertura e gere propostas. Nenhuma alteração é aplicada sem confirmação.';
+      return;
+    }
+    state.proposals.forEach(proposal => {
+      const card = document.createElement('article');
+      card.className = `proposal-card${proposal.requires_manual_review ? ' manual-review' : ''}`;
+      const copy = document.createElement('div');
+      const title = document.createElement('strong'); title.textContent = proposal.title;
+      const explanation = document.createElement('small'); explanation.textContent = proposal.explanation;
+      const meta = document.createElement('div'); meta.className = 'proposal-meta';
+      const courses = (proposal.affected_courses || []).map(item => Number(item) + 1).join(', ') || 'todas as fiadas necessárias';
+      meta.textContent = `Impacto ${Number(proposal.impact_cm || 0).toFixed(1)} cm · conflitos ${proposal.conflicts_before} → ${proposal.conflicts_after} · fiadas ${courses}`;
+      copy.append(title, explanation, meta);
+      if (proposal.requires_manual_review) {
+        const review = document.createElement('small');
+        review.textContent = 'Revisão manual obrigatória: verifique cotas, ambiente e elementos hospedados.';
+        copy.append(review);
+      }
+      const actions = document.createElement('div'); actions.className = 'proposal-actions';
+      [['preview', state.proposalPreviewId === proposal.id ? 'Prévia ativa' : 'Ver prévia'], ['apply', 'Aplicar']].forEach(([action, label]) => {
+        const button = document.createElement('button'); button.type = 'button';
+        button.dataset.proposalAction = action; button.dataset.proposalId = proposal.id;
+        button.textContent = label; button.disabled = action === 'preview' && state.proposalPreviewId === proposal.id;
+        actions.appendChild(button);
+      });
+      card.append(copy, actions); container.appendChild(card);
+    });
+  }
+
+  async function generateProposals(project) {
+    if (!currentModelId) return setStatus('Carregue uma captura do Revit para gerar propostas.', true);
+    if (state.proposalPreviewId) discardProposalPreview();
+    const target = project ? {} : proposalTarget();
+    if (!project && !target.wall_id && !target.opening_id) {
+      return setStatus('Selecione uma parede, abertura ou bloco antes de gerar propostas.', true);
+    }
+    if (state.proposalRequest) state.proposalRequest.abort();
+    const controller = new AbortController(); state.proposalRequest = controller;
+    setPanelOpen(byId('diagnostics-panel'), true); openDiagnosticTab('proposals');
+    setStatus(project ? 'Analisando alternativas do projeto…' : 'Simulando propostas para a seleção…');
+    try {
+      const response = await fetch('/api/proposals', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+        body: JSON.stringify(Object.assign({ model_id: currentModelId, base_revision: modelRevision, project: Boolean(project) }, target)),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Não foi possível gerar propostas.');
+      state.proposals = data.proposals || [];
+      renderProposalDock();
+      const message = state.proposals.length
+        ? `${state.proposals.length} proposta(s) simulada(s); escolha uma prévia.`
+        : 'Nenhuma alternativa segura melhorou ou preservou a modulação desta região.';
+      setStatus(message, !state.proposals.length); showToast(message, state.proposals.length ? 'ok' : 'warning');
+      appendDiagnosticLog(message);
+    } catch (error) {
+      if (error.name !== 'AbortError') { setStatus(`Falha ao gerar propostas: ${error.message || error}`, true); showToast('Falha ao simular propostas', 'error'); }
+    } finally {
+      if (state.proposalRequest === controller) state.proposalRequest = null;
+    }
+  }
+
+  function discardProposalPreview() {
+    if (!state.proposalPreviewId) return;
+    if (committedViewData) renderModulationData(committedViewData);
+    state.proposalPreviewId = null;
+    renderProposalDock();
+    setStatus('Prévia descartada; o modelo confirmado foi restaurado.');
+  }
+
+  async function previewProposal(proposalId) {
+    if (!currentModelId) return;
+    if (state.proposalPreviewId) discardProposalPreview();
+    setStatus('Montando prévia comparativa da proposta…');
+    try {
+      const response = await fetch('/api/preview-proposal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: currentModelId, proposal_id: proposalId, base_revision: modelRevision }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Prévia indisponível.');
+      renderModulationData(data, { preview: true, edit: data.edit });
+      state.proposalPreviewId = proposalId; renderProposalDock();
+      setStatus('Prévia ativa: compare os elementos realçados e confirme somente se fizer sentido.');
+    } catch (error) {
+      setStatus(`Falha na prévia: ${error.message || error}`, true); showToast('Não foi possível mostrar a prévia', 'error');
+    }
+  }
+
+  async function applyProposal(proposalId) {
+    if (!currentModelId) return;
+    setStatus('Aplicando proposta e revalidando a modulação…');
+    try {
+      const response = await fetch('/api/apply-proposal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: currentModelId, proposal_id: proposalId, base_revision: modelRevision }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'A proposta não foi aplicada.');
+      state.proposalPreviewId = null; state.proposals = [];
+      renderModulationData(data, { edit: data.edit }); renderProposalDock();
+      const message = 'Proposta aplicada e revalidada. Envie ao Revit quando estiver satisfeito com a revisão.';
+      setStatus(message); showToast('Proposta aplicada', 'ok'); appendDiagnosticLog(message);
+    } catch (error) {
+      setStatus(`Falha ao aplicar proposta: ${error.message || error}`, true); showToast('A proposta não foi aplicada', 'error');
+    }
   }
 
   function currentExportPayload() {
@@ -884,7 +1016,7 @@
             <label>Peitoril (m)<input id="prop-opening-sill" type="number" step="0.01" value="${(Number(opening.sill_cm) / 100).toFixed(3)}"></label>
             <label>Mover no eixo (m)<input id="prop-opening-delta" type="number" step="0.01" value="0"></label>
           </div>
-          <div class="property-actions"><button data-apply-opening>Aplicar</button><button data-duplicate-opening>Duplicar</button><button data-delete-opening>Excluir</button></div>
+          <div class="property-actions"><button data-apply-opening>Aplicar</button><button data-generate-proposals>Propostas</button><button data-duplicate-opening>Duplicar</button><button data-delete-opening>Excluir</button></div>
         </div>`);
     } else if (selectedObject.userData.kind === 'wall') {
       const wall = selectedObject.userData.wall;
@@ -899,7 +1031,7 @@
             <label>Espessura (cm)<input id="prop-wall-thickness" type="number" min="1" step="0.1" value="${Number(wall.thickness_cm).toFixed(1)}"></label>
             <label>Altura (m)<input id="prop-wall-height" type="number" min="0.01" step="0.01" value="${(Number(wall.height_cm || 280) / 100).toFixed(3)}"></label>
           </div>
-          <div class="property-actions"><button data-apply-wall>Aplicar</button><button data-wall-view>Vista da parede</button></div>
+          <div class="property-actions"><button data-apply-wall>Aplicar</button><button data-generate-proposals>Propostas</button><button data-wall-view>Vista da parede</button></div>
         </div>`);
     }
   }
@@ -1268,7 +1400,7 @@
       reason.textContent = `${status.reason || 'Revisão necessária'} · ${diagnosticSuggestion(status)}`;
       copy.append(title, reason);
       const actions = document.createElement('div'); actions.className = 'problem-actions';
-      [['locate', 'Localizar'], ['isolate', 'Isolar'], ['fix', 'Tentar corrigir']].forEach(([action, label]) => {
+      [['locate', 'Localizar'], ['isolate', 'Isolar'], ['proposals', 'Propostas']].forEach(([action, label]) => {
         const button = document.createElement('button'); button.type = 'button'; button.dataset.diagnosticAction = action;
         button.dataset.wallId = asString(wall.id); button.textContent = label; actions.appendChild(button);
       });
@@ -1806,6 +1938,7 @@
     else if (action === 'highlight-type') {
       const block = selectedBlock(); state.highlightBlockCode = block && block.logical_code; applyEditorVisibility();
     } else if (action === 'diagnostic') { setVisualMode('diagnostic'); showDiagnostics(currentWall()); }
+    else if (action === 'proposals') generateProposals(false);
     else if (action === 'hide') hideSelected();
   }
 
@@ -1904,10 +2037,9 @@
     if (!wall) return;
     if (button.dataset.diagnosticAction === 'locate') { focusOnWallId(wall.id); showDiagnostics(wall); }
     else if (button.dataset.diagnosticAction === 'isolate') isolateWall(wall);
-    else if (button.dataset.diagnosticAction === 'fix') postEditorAction('/api/edit-wall', {
-      wall_id: wall.id, start_cm: wall.start, end_cm: wall.end,
-      thickness_cm: wall.thickness_cm, height_cm: wall.height_cm,
-    }, `Parede ${wall.id} modulada novamente`);
+    else if (button.dataset.diagnosticAction === 'proposals') {
+      focusOnWallId(wall.id); generateProposals(false);
+    }
   });
   document.querySelectorAll('[data-close-overlay]').forEach(button => button.addEventListener('click', () => byId(button.dataset.closeOverlay).classList.remove('open')));
 
@@ -1957,6 +2089,16 @@
     const wall = currentWall() || currentWalls[0];
     if (wall) isolateWall(wall); else setStatus('Carregue um modelo com paredes.', true);
   });
+  byId('btn-proposals').addEventListener('click', () => generateProposals(false));
+  byId('btn-generate-proposals').addEventListener('click', () => generateProposals(false));
+  byId('btn-generate-project-proposals').addEventListener('click', () => generateProposals(true));
+  byId('btn-discard-proposal').addEventListener('click', discardProposalPreview);
+  byId('diagnostics-proposals').addEventListener('click', event => {
+    const button = event.target.closest('[data-proposal-action]');
+    if (!button) return;
+    if (button.dataset.proposalAction === 'preview') previewProposal(button.dataset.proposalId);
+    else if (button.dataset.proposalAction === 'apply') applyProposal(button.dataset.proposalId);
+  });
   byId('btn-diagnostic-mode').addEventListener('click', () => setVisualMode(byId('display-mode').value === 'diagnostic' ? 'realistic' : 'diagnostic'));
   byId('wall-previous').addEventListener('click', () => navigateWall(-1));
   byId('wall-next').addEventListener('click', () => navigateWall(1));
@@ -1976,6 +2118,7 @@
   byId('selection-panel').addEventListener('click', event => {
     if (event.target.closest('[data-apply-opening]')) applyOpeningProperties();
     else if (event.target.closest('[data-apply-wall]')) applyWallProperties();
+    else if (event.target.closest('[data-generate-proposals]')) generateProposals(false);
     else if (event.target.closest('[data-wall-view]')) isolateWall(currentWall());
     else if (event.target.closest('[data-duplicate-opening]')) {
       const opening = selectedObject && selectedObject.userData.opening;
