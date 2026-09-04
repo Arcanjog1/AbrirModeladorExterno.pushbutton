@@ -147,7 +147,7 @@ class EditorShellTests(unittest.TestCase):
     def test_visibility_and_diagnostic_docks_are_interactive(self):
         for control in ("btn-visibility-popover", "visibility-popover", "quick-display-mode"):
             self.assertIn(f'id="{control}"', self.html)
-        for tab in ("problems", "element", "history", "log", "dependencies", "commands"):
+        for tab in ("problems", "element", "performance", "history", "log", "dependencies", "commands"):
             self.assertIn(f'data-diagnostic-tab="{tab}"', self.html)
         for feature in ("filterDiagnosticProblems", "rebuildDiagnosticDock", "data-diagnostic-action", "diagnosticSuggestion"):
             self.assertIn(feature, self.javascript)
@@ -159,6 +159,16 @@ class EditorShellTests(unittest.TestCase):
         self.assertIn("h: hideSelected", self.javascript)
         for feature in ("multiSelectionGroup", "handleSelectionChanged", "renderMultiSelectionPanel", "event.ctrlKey || event.metaKey"):
             self.assertIn(feature, self.javascript)
+        self.assertIn("event.key === 'Delete'", self.javascript)
+
+    def test_incremental_scene_and_performance_instrumentation_are_visible(self):
+        self.assertIn('id="status-performance"', self.html)
+        self.assertIn('id="diagnostics-performance"', self.html)
+        for feature in (
+            "incremental_patch", "mergeAffectedItems", "scene_update",
+            "editor:drag-state", "beginFpsMeasurement", "geometry_hash",
+        ):
+            self.assertIn(feature, self.html + self.javascript + self.server)
 
     def test_section_can_invert_its_visible_side(self):
         self.assertIn('id="section-invert"', self.html)

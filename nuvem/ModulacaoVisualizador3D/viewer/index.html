@@ -369,9 +369,10 @@
     </div>
     <div id="diagnostics-panel" class="editor-floating-panel diagnostic-dock">
       <div class="panel-titlebar"><strong>Diagnóstico do modelo</strong><span class="panel-window-controls"><button type="button" data-panel-minimize="diagnostics-panel">—</button><button type="button" data-panel-close="diagnostics-panel">×</button></span></div>
-      <div class="diagnostic-tabs" role="tablist"><button type="button" class="active" data-diagnostic-tab="problems">Problemas</button><button type="button" data-diagnostic-tab="element">Diagnóstico</button><button type="button" data-diagnostic-tab="history">Histórico</button><button type="button" data-diagnostic-tab="log">Log</button><button type="button" data-diagnostic-tab="dependencies">Dependências</button><button type="button" data-diagnostic-tab="commands">Comandos</button></div>
+      <div class="diagnostic-tabs" role="tablist"><button type="button" class="active" data-diagnostic-tab="problems">Problemas</button><button type="button" data-diagnostic-tab="element">Diagnóstico</button><button type="button" data-diagnostic-tab="performance">Desempenho</button><button type="button" data-diagnostic-tab="history">Histórico</button><button type="button" data-diagnostic-tab="log">Log</button><button type="button" data-diagnostic-tab="dependencies">Dependências</button><button type="button" data-diagnostic-tab="commands">Comandos</button></div>
       <div class="diagnostic-tab-content active" data-diagnostic-content="problems"><div class="diagnostic-filters"><select id="diagnostic-filter-severity"><option value="">Toda gravidade</option><option value="error">Erros</option><option value="warning">Alertas</option></select><select id="diagnostic-filter-wall"><option value="">Todas as paredes</option></select><input type="search" id="diagnostic-filter-text" placeholder="Filtrar problemas…"></div><div id="diagnostics-conflicts">Nenhum conflito analisado.</div></div>
       <div class="diagnostic-tab-content" data-diagnostic-content="element"><div id="diagnostics-content">Selecione uma parede, abertura ou bloco para inspecionar.</div></div>
+      <div class="diagnostic-tab-content" data-diagnostic-content="performance"><div id="diagnostics-performance">Aguardando a primeira medição.</div></div>
       <div class="diagnostic-tab-content" data-diagnostic-content="history"><div id="diagnostics-history">Nenhuma edição nesta sessão.</div></div>
       <div class="diagnostic-tab-content" data-diagnostic-content="log"><div id="diagnostics-log">Aplicação iniciada. Aguardando modelo.</div></div>
       <div class="diagnostic-tab-content" data-diagnostic-content="dependencies"><div id="diagnostics-dependencies">Selecione um elemento para ver suas dependências.</div></div>
@@ -402,6 +403,7 @@
     <div id="selection-breadcrumb">Projeto</div>
     <div id="status-bar">
       <span id="status-message" class="status-cell">Pronto</span>
+      <span id="status-performance" class="status-cell status-secondary">Solver: — · Cena: — · FPS: —</span>
       <span id="status-selected" class="status-cell status-secondary">Nada selecionado</span><span id="status-kind" class="legacy-status">Tipo: —</span><span id="status-wall" class="legacy-status">Parede: —</span><span id="status-metrics" class="legacy-status">Dimensões: —</span><span id="status-modulation" class="legacy-status">Modulação: —</span><span id="status-alerts" class="status-cell status-secondary">Alertas: 0</span><span id="status-course" class="status-cell status-secondary">Fiada: Todas</span><span id="status-snap" class="status-cell status-secondary">Snap: 10mm</span><span id="status-scale" class="legacy-status">Movimento: 1 cm</span><span id="status-unit" class="status-cell status-secondary">Unidade: cm</span><span id="status-revit" class="status-cell status-secondary">Revit: aguardando</span>
       <span class="footer-spacer"></span>
       <button id="projection-mode" title="Alternar perspectiva/ortográfica">Perspectiva</button>
@@ -1389,6 +1391,7 @@ function startInteractivePointer(session, event) {
   controls.enabled = false;
   canvasEl.classList.add('direct-dragging');
   canvasEl.setPointerCapture(event.pointerId);
+  window.dispatchEvent(new CustomEvent('editor:drag-state', { detail: { active: true } }));
   event.preventDefault();
   event.stopPropagation();
   return true;
@@ -1401,6 +1404,7 @@ function cancelInteractiveEdit(message = 'Edição cancelada.') {
   if (editPreviewAbortController) editPreviewAbortController.abort();
   controls.enabled = true;
   canvasEl.classList.remove('direct-dragging');
+  window.dispatchEvent(new CustomEvent('editor:drag-state', { detail: { active: false } }));
   if (window.editorEndDirectPreview) window.editorEndDirectPreview();
   if (committedViewData) renderModulationData(committedViewData);
   setStatus(message);
@@ -1447,6 +1451,7 @@ function finishInteractivePointer(event, cancelled = false) {
   if (editPreviewAbortController) editPreviewAbortController.abort();
   controls.enabled = true;
   canvasEl.classList.remove('direct-dragging');
+  window.dispatchEvent(new CustomEvent('editor:drag-state', { detail: { active: false } }));
   if (canvasEl.hasPointerCapture(event.pointerId)) canvasEl.releasePointerCapture(event.pointerId);
   if (cancelled || !session.moved || !computed || Math.abs(Number(computed.deltaCm || 0)) < 1e-6) {
     if (window.editorEndDirectPreview) window.editorEndDirectPreview();
@@ -1719,7 +1724,27 @@ function renderOpenings(openings, affectedWallIds = null) {
   openingsGroup.visible = document.getElementById('mode-openings').checked;
 }
 
+function mergeAffectedItems(current, patch, affectedWallIds, identitySet) {
+  return (current || []).filter(item => !setsIntersect(identitySet(item), affectedWallIds))
+    .concat(patch || []);
+}
+
+function hydrateIncrementalCandidates(candidates, catalog) {
+  return (candidates || []).map(candidate => {
+    const definition = (catalog || {})[candidate.logical_code] || {};
+    return Object.assign({
+      type_name: definition.type_name || candidate.logical_code,
+      length_cm: definition.length_cm || 0,
+      width_cm: definition.width_cm || 14,
+      height_cm: definition.height_cm || 19,
+      cells_local_cm: definition.cells_local_cm || [],
+      color_rgb: definition.color_rgb,
+    }, candidate);
+  });
+}
+
 function renderModulationData(data, options = {}) {
+  const sceneUpdateStarted = performance.now();
   const previousModelId = currentModelId;
   const affectedWallIds = new Set(((data.edit || {}).affected_wall_ids || [])
     .concat((data.edit || {}).source_wall_ids || [])
@@ -1727,6 +1752,21 @@ function renderModulationData(data, options = {}) {
     .map(value => String(value || '')).filter(Boolean));
   const incremental = affectedWallIds.size > 0 && previousModelId
     && previousModelId === data.model_id && wallGroup.children.length > 0;
+  if (data.incremental_patch && incremental) {
+    const catalog = data.catalog || currentCatalog || (committedViewData && committedViewData.catalog) || {};
+    const patchCandidates = data.compact_block_candidates
+      ? hydrateIncrementalCandidates(data.block_candidates, catalog)
+      : data.block_candidates;
+    data = Object.assign({}, committedViewData || {}, data, {
+      walls: mergeAffectedItems(currentWalls, data.walls, affectedWallIds, wallIdentitySet),
+      openings: mergeAffectedItems(currentOpenings, data.openings, affectedWallIds, openingIdentitySet),
+      block_candidates: mergeAffectedItems(
+        currentBlockCandidates, patchCandidates, affectedWallIds, candidateIdentitySet
+      ),
+      entities: (committedViewData && committedViewData.entities) || currentEntities,
+      incremental_patch: false,
+    });
+  }
   if (!incremental) resetWalls();
   currentWalls = data.walls || [];
   currentOpenings = data.openings || [];
@@ -1735,7 +1775,6 @@ function renderModulationData(data, options = {}) {
   currentModelId = data.model_id || null;
   if (!options.preview && Number.isFinite(Number(data.revision))) modelRevision = Number(data.revision);
   if (!options.preview) {
-    committedViewData = data;
     activePreviewAction = null;
   }
   if (incremental) {
@@ -1775,7 +1814,7 @@ function renderModulationData(data, options = {}) {
       : (solver.collision_count || 0) + (solver.non_modular_count || 0) + (solver.jamb_exception_count || 0);
     summaryText = `${currentWalls.length} parede(s) contínua(s) · ${solver.candidate_count || 0} bloco(s) resolvido(s).`;
     summaryText += conflicts ? `\n${conflicts} conflito(s) do solver exigem ajuste.` : '\nModulação validada sem conflitos pelo solver.';
-    if (solver.partial_recalculation) summaryText += '\nRecalculada somente a faixa de nível/base alterada.';
+    if (solver.partial_recalculation) summaryText += '\nRecalculada somente a componente conectada alterada; o restante foi preservado.';
   } else {
     summaryText = `${currentWalls.length} parede(s) — ${closesCount} fecham em blocos, ${currentWalls.length - closesCount} precisam de ajuste.`;
   }
@@ -1805,6 +1844,10 @@ function renderModulationData(data, options = {}) {
   applyDisplayMode();
   applySectionPlane();
   if (window.applyEditorVisibility) window.applyEditorVisibility();
+  data.performance_ms = Object.assign({}, data.performance_ms || {}, {
+    scene_update: Math.round((performance.now() - sceneUpdateStarted) * 10) / 10,
+  });
+  if (!options.preview) committedViewData = data;
   window.dispatchEvent(new CustomEvent('editor:model-rendered', { detail: { data, options, incremental } }));
   requestRender();
 }

@@ -268,7 +268,7 @@ button, input, select, textarea { font-family: "Segoe UI Variable", "Segoe UI", 
 #section-panel input, #section-panel select { color: var(--editor-text); background: var(--editor-bg); border-color: var(--editor-border); }
 #diagnostics-panel.diagnostic-dock { left: 50px !important; right: 8px !important; top: auto !important; bottom: var(--statusbar-height) !important; width: auto !important; height: 190px; min-height: 116px; max-height: 48vh; padding: 7px 9px; resize: vertical; border-radius: 5px 5px 0 0 !important; }
 #diagnostics-panel.diagnostic-dock .panel-titlebar { cursor: ns-resize; }
-#diagnostics-content, #diagnostics-conflicts, #diagnostics-history, #diagnostics-log { padding: 8px 2px; white-space: pre-wrap; color: var(--editor-muted); font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px; line-height: 1.5; }
+#diagnostics-content, #diagnostics-conflicts, #diagnostics-history, #diagnostics-log, #diagnostics-performance { padding: 8px 2px; white-space: pre-wrap; color: var(--editor-muted); font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px; line-height: 1.5; }
 .diagnostic-tabs { display: flex; align-items: center; gap: 2px; margin-top: 4px; border-bottom: 1px solid var(--editor-border); }
 .diagnostic-tabs button { height: 26px; margin: 0; padding: 0 10px; color: var(--editor-muted); background: transparent; border: 0; border-bottom: 2px solid transparent; border-radius: 0; font-size: 9px; }
 .diagnostic-tabs button:hover { color: var(--editor-text); background: var(--editor-hover); }
@@ -336,6 +336,7 @@ button, input, select, textarea { font-family: "Segoe UI Variable", "Segoe UI", 
 .status-cell { height: 100%; display: flex; align-items: center; padding: 0 8px; border: 0; }
 .status-secondary { border-left: 1px solid var(--editor-border); }
 #status-message { min-width: 140px; max-width: 300px; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; color: var(--editor-muted); }
+#status-performance { color: var(--editor-text); font-variant-numeric: tabular-nums; }
 .footer-spacer { flex: 1; }
 .legacy-status { display: none; }
 .status-ok { color: var(--editor-ok) !important; } .status-error { color: var(--editor-error) !important; }
@@ -429,6 +430,7 @@ button, input, select, textarea { font-family: "Segoe UI Variable", "Segoe UI", 
   #wall-inspector { max-width: calc(100vw - 110px); overflow-x: auto; }
   #status-coordinates { display: none; }
   #status-unit, #status-revit, #status-alerts { display: none; }
+  #status-performance { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
 }
 
 @media (max-width: 900px) {

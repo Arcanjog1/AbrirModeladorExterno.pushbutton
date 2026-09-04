@@ -24,6 +24,7 @@ class EditorSession(object):
         self._lock = threading.RLock()
         self._cache_limit = max(1, int(cache_limit))
         self._preview_cache = OrderedDict()
+        self._preview_generation = 0
         self._revision = 0
         self._history = [self._snapshot(capture, candidates, diagnostics, None)]
         self._history_index = 0
@@ -65,6 +66,22 @@ class EditorSession(object):
                 self._preview_cache.popitem(last=False)
         return value, False
 
+    def begin_preview(self):
+        """Marca uma nova intenção interativa; somente ela continua vigente."""
+        with self._lock:
+            self._preview_generation += 1
+            return self._preview_generation
+
+    def is_preview_current(self, generation):
+        with self._lock:
+            return int(generation) == self._preview_generation
+
+    def cancel_previews(self):
+        """Invalida workers antigos sem tocar no snapshot confirmado."""
+        with self._lock:
+            self._preview_generation += 1
+            return self._preview_generation
+
     def commit(self, expected_revision, capture, candidates, diagnostics, action):
         """Persiste uma edição se não houver conflito de geração.
 
@@ -83,6 +100,7 @@ class EditorSession(object):
             self._history.append(state)
             self._history_index += 1
             self._revision += 1
+            self._preview_generation += 1
             self._preview_cache.clear()
             return True, self._revision, self._snapshot(
                 state["capture"], state["candidates"], state["diagnostics"], state["action"]
@@ -103,6 +121,7 @@ class EditorSession(object):
                 return False, "unavailable", self._revision, None
             self._history_index = new_index
             self._revision += 1
+            self._preview_generation += 1
             self._preview_cache.clear()
             state = self._history[self._history_index]
             return True, "ok", self._revision, self._snapshot(

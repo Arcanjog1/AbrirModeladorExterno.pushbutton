@@ -9,6 +9,7 @@ validacao/preview reaproveita as regras importadas por `engine_bridge`.
 
 import copy
 import math
+from collections import OrderedDict
 
 from engine_bridge import (
     FEET_PER_METER, JUNCTION_FACE_SEARCH_FT, BLOCK_JOINT_CM,
@@ -29,6 +30,8 @@ MIN_EDITABLE_WALL_THICKNESS_CM = 1.0
 MIN_EDITABLE_WALL_HEIGHT_CM = 1.0
 MIN_EDITABLE_OPENING_WIDTH_CM = 1.0
 MIN_EDITABLE_OPENING_HEIGHT_CM = 1.0
+_DEPENDENCY_GRAPH_CACHE = OrderedDict()
+_DEPENDENCY_GRAPH_CACHE_LIMIT = 8
 
 
 def _xy_point(value, field_name):
@@ -740,6 +743,49 @@ def _source_ids_for_display_wall(wall):
     return set(value for value in ids if value)
 
 
+def _dependency_geometry_key(capture):
+    rows = []
+    for raw in capture.get("walls") or []:
+        start = raw.get("start_cm") or raw.get("start") or []
+        end = raw.get("end_cm") or raw.get("end") or []
+        rows.append((
+            tuple(_raw_wall_ids(raw)), tuple(start[:2]), tuple(end[:2]),
+            raw.get("thickness_cm"), raw.get("width_cm"), raw.get("height_cm"),
+            raw.get("base_z_cm"), raw.get("level"),
+        ))
+    return tuple(rows)
+
+
+def _dependency_graph_rows(capture):
+    """Grafo geométrico memoizado; mover abertura não altera esta chave."""
+    cache_key = _dependency_geometry_key(capture)
+    cached = _DEPENDENCY_GRAPH_CACHE.get(cache_key)
+    if cached is not None:
+        _DEPENDENCY_GRAPH_CACHE.move_to_end(cache_key)
+        return cached
+    rows = []
+    for _key, group_raw_walls, group_openings in _capture_wall_groups(capture):
+        graph, raw_by_tuple, _openings, _junctions, nodes, _end_to_node, _skipped = _capture_graph_for_raw(
+            group_raw_walls, group_openings
+        )
+        adjacency = dict((index, set()) for index in range(len(graph)))
+        for node in nodes:
+            involved = set(index for index, _end in (node.get("arms") or []))
+            involved.update(node.get("crossing_walls") or [])
+            for field in ("main_wall_idx", "incoming_wall_idx", "neighbor_wall_idx"):
+                index = node.get(field)
+                if isinstance(index, int):
+                    involved.add(index)
+            for index in involved:
+                adjacency.setdefault(index, set()).update(involved - {index})
+        rows.append((raw_by_tuple, adjacency))
+    _DEPENDENCY_GRAPH_CACHE[cache_key] = rows
+    _DEPENDENCY_GRAPH_CACHE.move_to_end(cache_key)
+    while len(_DEPENDENCY_GRAPH_CACHE) > _DEPENDENCY_GRAPH_CACHE_LIMIT:
+        _DEPENDENCY_GRAPH_CACHE.popitem(last=False)
+    return rows
+
+
 def _affected_wall_ids(capture, source_ids):
     """Retorna a componente de encontros afetada por uma edição.
 
@@ -749,34 +795,42 @@ def _affected_wall_ids(capture, source_ids):
     uma alteração pareça afetar o projeto inteiro silenciosamente.
     """
     affected = set()
-    for _key, group_raw_walls, group_openings in _capture_wall_groups(capture):
-        graph, raw_by_tuple, _openings, _junctions, nodes, _end_to_node, _skipped = _capture_graph_for_raw(
-            group_raw_walls, group_openings
-        )
+    for raw_by_tuple, adjacency in _dependency_graph_rows(capture):
         selected = {
             index for index, raw in enumerate(raw_by_tuple)
             if _source_ids_for_display_wall(raw) & source_ids
         }
         if not selected:
             continue
-        adjacency = dict((index, set()) for index in range(len(graph)))
-        for node in nodes:
-            involved = set(index for index, _end in (node.get("arms") or []))
-            involved.update(node.get("crossing_walls") or [])
-            for index in involved:
-                adjacency.setdefault(index, set()).update(involved - {index})
-        pending = list(selected)
+        # Um salto é o fecho seguro do resolve parcial do solver: a parede
+        # alterada e quem compartilha diretamente um encontro com ela. Ir
+        # transitivamente até o fim da rede transformaria qualquer edição em
+        # recálculo das 125 paredes conectadas do projeto real.
         visited = set(selected)
-        while pending:
-            index = pending.pop()
+        for index in selected:
             for neighbor in adjacency.get(index, ()):
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    pending.append(neighbor)
+                visited.add(neighbor)
         for index in visited:
             if index < len(raw_by_tuple):
                 affected.update(_source_ids_for_display_wall(raw_by_tuple[index]))
     return sorted(affected)
+
+
+def dependency_context_wall_ids(capture, affected_wall_ids):
+    """Acrescenta um anel de contexto sem promovê-lo a região alterada.
+
+    O solver canônico precisa enxergar os encontros nas pontas das Walls que
+    serão recalculadas. Essas Walls de borda participam do cálculo, mas seus
+    blocos não entram no delta enviado à cena.
+    """
+    return _affected_wall_ids(
+        capture, set(str(value) for value in (affected_wall_ids or []) if str(value))
+    )
+
+
+def warm_dependency_graph(capture):
+    """Prepara o grafo no worker de carga antes do primeiro arraste."""
+    _dependency_graph_rows(capture)
 
 
 def _group_keys_for_source_ids(capture, source_ids):

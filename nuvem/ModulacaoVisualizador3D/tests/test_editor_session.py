@@ -43,3 +43,12 @@ class TestEditorSession(unittest.TestCase):
         self.assertEqual(calls, [1])
         _revision, current = session.current()
         self.assertEqual(current["capture"], {"x": 1})
+
+    def test_only_latest_preview_generation_remains_current(self):
+        session = EditorSession({"x": 1})
+        first = session.begin_preview()
+        second = session.begin_preview()
+        self.assertFalse(session.is_preview_current(first))
+        self.assertTrue(session.is_preview_current(second))
+        session.cancel_previews()
+        self.assertFalse(session.is_preview_current(second))

@@ -32,6 +32,10 @@
     importStep: 1,
     multiSelection: [],
     additiveSelection: false,
+    performance: {},
+    dragFps: null,
+    fpsActive: false,
+    dependencyGraph: null,
   };
 
   window.editorRealtimeEnabled = true;
@@ -305,6 +309,68 @@
     const lines = log.textContent === 'Aplicação iniciada. Aguardando modelo.' ? [] : log.textContent.split('\n');
     lines.push(`[${stamp}] ${message}`);
     log.textContent = lines.slice(-80).join('\n');
+  }
+
+  function metric(value, suffix) {
+    return value != null && Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)}${suffix || ''}` : '—';
+  }
+
+  function renderPerformance(data) {
+    const performanceData = Object.assign({}, state.performance, (data && data.performance_ms) || {});
+    state.performance = performanceData;
+    const fps = state.dragFps;
+    const status = byId('status-performance');
+    if (status) {
+      status.textContent = `Solver: ${metric(performanceData.solver, 'ms')} · Cena: ${metric(performanceData.scene_update, 'ms')} · FPS: ${metric(fps)}`;
+      status.title = 'Medições da última atualização incremental';
+    }
+    const panel = byId('diagnostics-performance');
+    if (!panel) return;
+    const cacheState = performanceData.cache_hit ? 'reutilizado' : 'novo cálculo';
+    panel.textContent = [
+      `Detecção de dependências  ${metric(performanceData.detection, ' ms')}`,
+      `Solver canônico          ${metric(performanceData.solver, ' ms')}`,
+      `Montagem da resposta     ${metric(performanceData.payload, ' ms')}`,
+      `Serialização             ${metric(performanceData.serialization, ' ms')}`,
+      `Atualização da cena      ${metric(performanceData.scene_update, ' ms')}`,
+      `Tempo total no servidor  ${metric(performanceData.total, ' ms')}`,
+      `FPS durante o arraste    ${metric(fps)}`,
+      '',
+      `Paredes afetadas         ${performanceData.affected_walls ?? '—'}`,
+      `Paredes processadas      ${performanceData.processed_walls ?? '—'}`,
+      `Fiadas afetadas          ${performanceData.affected_courses ?? '—'}`,
+      `Blocos removidos/adicionados  ${performanceData.blocks_removed ?? '—'} / ${performanceData.blocks_added ?? '—'}`,
+      `Candidatos no delta      ${performanceData.response_candidates ?? '—'}`,
+      `Resposta                 ${Number.isFinite(Number(performanceData.response_bytes)) ? `${(Number(performanceData.response_bytes) / 1024).toFixed(1)} KB` : '—'}`,
+      `Cache                    ${cacheState}`,
+      `geometryHash             ${performanceData.geometry_hash || '—'}`,
+      `modulationHash           ${performanceData.modulation_hash || '—'}`,
+    ].join('\n');
+  }
+
+  function beginFpsMeasurement() {
+    if (state.fpsActive) return;
+    state.fpsActive = true;
+    let frames = 0;
+    let started = performance.now();
+    const sample = now => {
+      if (!state.fpsActive) return;
+      frames += 1;
+      const elapsed = now - started;
+      if (elapsed >= 400) {
+        state.dragFps = Math.round((frames * 1000 / elapsed) * 10) / 10;
+        frames = 0;
+        started = now;
+        renderPerformance();
+      }
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }
+
+  function endFpsMeasurement() {
+    state.fpsActive = false;
+    renderPerformance();
   }
 
   function currentExportPayload() {
@@ -1211,7 +1277,19 @@
     if (!conflicts.length) container.textContent = '✓ Nenhum conflito detectado no modelo atual.';
     byId('diagnostics-history').textContent = byId('history-list').textContent;
     const wall = currentWall();
-    if (!wall) byId('diagnostics-dependencies').textContent = 'Selecione uma parede, abertura ou bloco para ver suas dependências.';
+    if (!wall && !state.dependencyGraph) byId('diagnostics-dependencies').textContent = 'Selecione uma parede, abertura ou bloco para ver suas dependências.';
+    else if (!wall) {
+      const graph = state.dependencyGraph;
+      byId('diagnostics-dependencies').textContent = [
+        'Última invalidação incremental',
+        `Elemento alterado: ${(graph.changed_elements || []).filter(Boolean).join(', ') || '—'}`,
+        `Paredes fonte: ${(graph.source_wall_ids || []).join(', ') || '—'}`,
+        `Componente afetada: ${(graph.affected_wall_ids || []).join(', ') || '—'}`,
+        `Contexto lido pelo solver: ${(graph.solver_context_wall_ids || []).join(', ') || '—'}`,
+        `Fiadas recalculadas: ${(graph.affected_course_indices || []).map(index => Number(index) + 1).join(', ') || '—'}`,
+        `Dependências invalidadas: ${(graph.invalidation || []).join(' → ') || '—'}`,
+      ].join('\n');
+    }
     else {
       const relatedOpenings = currentOpenings.filter(opening => intersects(openingWallIds(opening), wallIds(wall)));
       const relatedBlocks = currentBlockCandidates.filter(candidate => intersects(candidateWallIds(candidate), wallIds(wall)));
@@ -2027,6 +2105,14 @@
     if ((event.ctrlKey || event.metaKey) && key === 'f') { event.preventDefault(); event.stopImmediatePropagation(); openOverlay('element-search'); return; }
     if ((event.ctrlKey || event.metaKey) && (key === 'k' || key === 'p')) { event.preventDefault(); event.stopImmediatePropagation(); openOverlay('command-palette'); return; }
     if (!editingField && !event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat) {
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedOpeningId) {
+        const opening = currentOpenings.find(item => asString(item.element_id) === asString(selectedOpeningId));
+        if (opening) {
+          event.preventDefault();
+          postEditorAction('/api/delete-opening', { opening_id: opening.element_id }, 'Abertura excluída');
+          return;
+        }
+      }
       const shortcuts = {
         s: () => { setNavigationTool('select'); setTool('select'); },
         o: () => setNavigationTool('orbit'),
@@ -2077,12 +2163,17 @@
   });
   window.addEventListener('editor:model-rendered', event => {
     const detail = event.detail || {};
+    if (detail.data && detail.data.dependency_graph) state.dependencyGraph = detail.data.dependency_graph;
     if (state.isolatedWallId || state.connectedWallIds || state.hiddenWallIds.size || state.hiddenOpeningIds.size || state.highlightBlockCode) applyEditorVisibility();
     updateProjectName(); updateProjectSnap(detail.data || {}); rebuildCourseFilter(); rebuildCourseLabels(); rebuildDiagnosticMarkers(); rebuildDiagnosticDock(); updateStatusSelection();
     appendDiagnosticLog(detail.options && detail.options.preview ? 'Prévia geométrica atualizada.' : `Modelo renderizado · ${currentWalls.length} parede(s) · ${currentBlockCandidates.length} bloco(s).`);
     if (detail.options && detail.options.preview) showPreviewFeedback(detail.data || {}); else clearThreeGroup(previewFeedbackGroup);
     if (byId('section-live-enabled').checked) applyLiveSection(true);
     const wall = currentWall(); if (wall && byId('wall-inspector').classList.contains('open')) updateWallInspector(wall);
+    renderPerformance(detail.data || {});
+  });
+  window.addEventListener('editor:drag-state', event => {
+    if (event.detail && event.detail.active) beginFpsMeasurement(); else endFpsMeasurement();
   });
 
   const statusObserver = new MutationObserver(() => {

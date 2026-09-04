@@ -57,6 +57,7 @@ import json
 import hashlib
 import os
 import sys
+import threading
 import time
 import traceback
 from collections import OrderedDict
@@ -73,6 +74,7 @@ from wall_capture import (
     solve_capture_block_candidates, adjust_capture_opening, adjust_capture_openings,
     edit_capture_wall, move_capture_opening, resize_capture_opening,
     edit_capture_opening, duplicate_capture_opening, delete_capture_opening,
+    dependency_context_wall_ids, warm_dependency_graph,
 )
 from modulation_preview import preview_walls
 from file_dialog import pick_dwg_file, pick_json_file, DialogError
@@ -83,6 +85,12 @@ from modulation_calculator import (
     calculate_capture_solutions, calculate_project_solutions, calculate_wall_solutions,
 )
 from editor_session import EditorSession
+from incremental_pipeline import (
+    dependency_graph, filter_incremental_payload, geometry_hash,
+    merge_scoped_candidates, merge_scoped_statuses, modulation_hash,
+    normalize_scoped_candidates, scope_capture, candidate_wall_ids,
+    opening_wall_ids, raw_wall_ids,
+)
 
 VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 _LOAD_CACHE = OrderedDict()
@@ -98,6 +106,10 @@ _STATIC_CONTENT_TYPES = {
     ".css": "text/css; charset=utf-8",
 }
 _VIEWER_BUILD_FILES = ("index.html", "editor-shell.css", "editor-shell.js")
+
+
+class PreviewSuperseded(Exception):
+    """Interrompe silenciosamente uma prévia substituída por intenção nova."""
 
 
 def _viewer_build_id():
@@ -157,6 +169,10 @@ def _store_capture_model(cache_key, capture, candidates=None, diagnostics=None):
     # histórico e a geração atual do editor, enquanto os caches continuam
     # atendendo o carregamento de arquivos sem editar o modelo.
     _remember(_EDITOR_SESSIONS, model_id, EditorSession(capture, candidates, diagnostics))
+    if capture.get("walls"):
+        worker = threading.Thread(target=warm_dependency_graph, args=(capture,))
+        worker.daemon = True
+        worker.start()
     return model_id
 
 
@@ -246,16 +262,103 @@ def _capture_view_payload(capture, candidates=None, block_diagnostics=None):
     }
 
 
+def _incremental_capture_view_payload(capture, candidates, block_diagnostics,
+                                      affected_wall_ids):
+    """Monta apenas a geometria que a cena precisa substituir.
+
+    A resposta inicial precisa converter todas as Walls da captura para o
+    formato de visualização. Em uma edição, porém, o browser já possui essa
+    cena: recriar as outras centenas de Walls só para descartá-las no filtro
+    seguinte consumia a maior parte do tempo da prévia. O solver continua
+    recebendo seu contexto de encontro; este helper limita *somente a camada
+    de apresentação* às Walls primárias que de fato serão trocadas na cena.
+    """
+    affected_ids = list(affected_wall_ids or [])
+    scoped_capture = scope_capture(capture, affected_ids)
+    wanted = set(str(value) for value in affected_ids if str(value))
+    scoped_candidates = [
+        candidate for candidate in (candidates or [])
+        if candidate_wall_ids(candidate) & wanted
+    ]
+    payload = _capture_view_payload(
+        scoped_capture, scoped_candidates, block_diagnostics
+    )
+    payload = filter_incremental_payload(payload, affected_ids)
+    # ``filter_incremental_payload`` enxerga deliberadamente só o recorte.
+    # Os totais, por sua vez, devem continuar descrevendo o modelo inteiro.
+    payload["totals"] = {
+        "walls": len(capture.get("walls") or []),
+        "openings": len(capture.get("openings") or []),
+        "block_candidates": len(candidates or []),
+    }
+    # A validação de uma única componente não pode substituir os avisos do
+    # projeto todo que o cliente já exibe. O diagnóstico do solver permanece,
+    # pois ele contém os contadores globais atualizados após a mesclagem.
+    for key in ("validation", "diagnostics", "warnings"):
+        payload.pop(key, None)
+    return payload
+
+
+def _merge_incremental_cache_payload(cached_payload, delta_payload, candidates,
+                                     diagnostics, affected_wall_ids):
+    """Mantém a cópia completa de recarga sem reconstruir a cena inteira.
+
+    O cache de ``/api/load`` é usado quando o navegador é atualizado depois
+    de uma edição confirmada. Ele precisa continuar completo, enquanto a
+    resposta da edição pode ser compacta. Mesclamos o mesmo delta de volta ao
+    snapshot em cache para não pagar a conversão integral de Walls no fim de
+    cada arraste.
+    """
+    wanted = set(str(value) for value in (affected_wall_ids or []) if str(value))
+    merged = dict(cached_payload)
+    merged["walls"] = [
+        wall for wall in (cached_payload.get("walls") or [])
+        if not (raw_wall_ids(wall) & wanted)
+    ] + list(delta_payload.get("walls") or [])
+    merged["openings"] = [
+        opening for opening in (cached_payload.get("openings") or [])
+        if not (opening_wall_ids(opening) & wanted)
+    ] + list(delta_payload.get("openings") or [])
+    merged["block_candidates"] = [
+        candidate for candidate in (cached_payload.get("block_candidates") or [])
+        if not (candidate_wall_ids(candidate) & wanted)
+    ] + [
+        candidate for candidate in (candidates or [])
+        if candidate_wall_ids(candidate) & wanted
+    ]
+    merged["block_diagnostics"] = diagnostics
+    merged["totals"] = dict(delta_payload.get("totals") or {})
+    merged.pop("incremental_patch", None)
+    merged.pop("compact_block_candidates", None)
+    return merged
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         sys.stderr.write("[server] " + (format % args) + "\n")
 
     def _send_json(self, status, payload):
+        serialization_started = time.perf_counter()
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        performance = payload.get("performance_ms") if isinstance(payload, dict) else None
+        if isinstance(performance, dict):
+            performance["serialization"] = round(
+                (time.perf_counter() - serialization_started) * 1000.0, 1
+            )
+            performance["response_bytes"] = len(body)
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        if isinstance(performance, dict):
+            self.send_header(
+                "Server-Timing",
+                "detect;dur={}, solver;dur={}, payload;dur={}".format(
+                    performance.get("detection", 0), performance.get("solver", 0),
+                    performance.get("payload", 0),
+                ),
+            )
         self.end_headers()
         self.wfile.write(body)
 
@@ -579,29 +682,42 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             return self._send_json(500, {"error": str(exc)})
 
-    def _recalculate_capture_edit(self, model_id, capture, action):
-        """Executa só as faixas alteradas e preserva candidatos independentes."""
+    def _recalculate_capture_edit(self, model_id, capture, action, should_cancel=None):
+        """Executa só a componente conectada e preserva candidatos independentes."""
+        calculation_started = time.perf_counter()
         groups = action.get("solver_group_keys") or []
+        affected_ids = list(action.get("affected_wall_ids") or action.get("source_wall_ids") or [])
         previous_solution = _CAPTURE_SOLUTIONS.get(model_id)
-        if previous_solution is not None and groups:
-            changed_candidates, changed_diagnostics = solve_capture_block_candidates(
-                capture, group_keys=groups
+        if previous_solution is not None and groups and affected_ids:
+            detection_started = time.perf_counter()
+            context_ids = dependency_context_wall_ids(capture, affected_ids)
+            scoped_capture = scope_capture(capture, context_ids)
+            geometry_key = geometry_hash(capture, affected_ids, groups)
+            modulation_key = modulation_hash(capture)
+            detection_ms = (time.perf_counter() - detection_started) * 1000.0
+            if should_cancel is not None and should_cancel():
+                raise PreviewSuperseded()
+            solver_started = time.perf_counter()
+            scoped_candidates, changed_diagnostics = solve_capture_block_candidates(
+                scoped_capture, group_keys=groups
             )
-            group_tokens = set((str(key[0]), float(key[1])) for key in groups)
-
-            def belongs_to_changed_group(candidate):
-                key = candidate.get("solver_group_key") or []
-                return len(key) >= 2 and (str(key[0]), float(key[1])) in group_tokens
-
-            candidates = [
-                candidate for candidate in previous_solution.get("candidates") or []
-                if not belongs_to_changed_group(candidate)
-            ] + changed_candidates
-            processed_ids = set(str(value) for value in (action.get("processed_source_wall_ids") or []))
-            statuses = [
-                status for status in (previous_solution.get("diagnostics") or {}).get("wall_statuses") or []
-                if not (set(str(value) for value in (status.get("source_wall_ids") or [])) & processed_ids)
-            ] + list(changed_diagnostics.get("wall_statuses") or [])
+            solver_ms = (time.perf_counter() - solver_started) * 1000.0
+            if should_cancel is not None and should_cancel():
+                raise PreviewSuperseded()
+            wanted = set(str(value) for value in affected_ids)
+            changed_candidates = normalize_scoped_candidates([
+                candidate for candidate in scoped_candidates
+                if candidate_wall_ids(candidate) & wanted
+            ])
+            action["processed_source_wall_ids"] = sorted(wanted)
+            action["solver_context_wall_ids"] = sorted(set(str(value) for value in context_ids))
+            candidates, removed_count, added_count = merge_scoped_candidates(
+                previous_solution.get("candidates") or [], changed_candidates, affected_ids
+            )
+            statuses = merge_scoped_statuses(
+                (previous_solution.get("diagnostics") or {}).get("wall_statuses") or [],
+                changed_diagnostics.get("wall_statuses") or [], affected_ids,
+            )
             diagnostics = dict(previous_solution.get("diagnostics") or {})
             diagnostics.update({
                 "status": changed_diagnostics.get("status", "ok"),
@@ -610,34 +726,108 @@ class Handler(BaseHTTPRequestHandler):
                 "processed_group_keys": changed_diagnostics.get("processed_group_keys") or groups,
                 "partial_recalculation": True,
             })
-            return candidates, diagnostics
-        return solve_capture_block_candidates(capture)
+            affected_courses = sorted(set(
+                int(candidate.get("course_index")) for candidate in changed_candidates
+                if candidate.get("course_index") is not None
+            ))
+            action["affected_course_indices"] = affected_courses
+            action["blocks_removed"] = removed_count
+            action["blocks_added"] = added_count
+            action["dependency_graph"] = dependency_graph(action)
+            performance = {
+                "detection": round(detection_ms, 1),
+                "solver": round(solver_ms, 1),
+                "affected_walls": len(set(str(value) for value in affected_ids)),
+                "processed_walls": len(set(str(value) for value in context_ids)),
+                "context_wall_ids": sorted(set(str(value) for value in context_ids)),
+                "affected_courses": len(affected_courses),
+                "course_indices": affected_courses,
+                "blocks_added": added_count,
+                "blocks_removed": removed_count,
+                "geometry_hash": geometry_key,
+                "modulation_hash": modulation_key,
+                "calculation": round((time.perf_counter() - calculation_started) * 1000.0, 1),
+                "incremental_reuse": True,
+            }
+            return candidates, diagnostics, performance
+        solver_started = time.perf_counter()
+        candidates, diagnostics = solve_capture_block_candidates(capture)
+        solver_ms = (time.perf_counter() - solver_started) * 1000.0
+        return candidates, diagnostics, {
+            "detection": 0.0, "solver": round(solver_ms, 1),
+            "affected_walls": len(capture.get("walls") or []),
+            "processed_walls": len(capture.get("walls") or []),
+            "blocks_added": len(candidates), "blocks_removed": 0,
+            "geometry_hash": geometry_hash(capture, affected_ids, groups),
+            "modulation_hash": modulation_hash(capture),
+            "calculation": round((time.perf_counter() - calculation_started) * 1000.0, 1),
+        }
 
     def _preview_capture_edit(self, model_id, capture, action, started_at,
                               session=None, base_revision=None, request_revision=None):
         """Prévia efêmera: calcula, renderiza e nunca altera o modelo salvo."""
         cache_key = None
+        preview_generation = session.begin_preview() if session is not None else None
         if session is not None:
-            cache_key = json.dumps({
-                "base_revision": base_revision,
-                "action": action,
-            }, sort_keys=True, ensure_ascii=False, default=str)
-            solved, cache_hit = session.preview(
-                cache_key,
-                lambda: self._recalculate_capture_edit(model_id, capture, action),
+            cache_key = "{}:{}".format(
+                base_revision, geometry_hash(
+                    capture, action.get("affected_wall_ids") or action.get("source_wall_ids") or [],
+                    action.get("solver_group_keys") or [],
+                )
             )
-            candidates, diagnostics = solved
+            try:
+                solved, cache_hit = session.preview(
+                    cache_key,
+                    lambda: self._recalculate_capture_edit(
+                        model_id, capture, action,
+                        should_cancel=lambda: not session.is_preview_current(preview_generation),
+                    ),
+                )
+            except PreviewSuperseded:
+                return self._send_json(409, {
+                    "cancelled": True, "reason": "preview_superseded",
+                    "request_revision": request_revision,
+                })
+            if not session.is_preview_current(preview_generation):
+                return self._send_json(409, {
+                    "cancelled": True, "reason": "preview_superseded",
+                    "request_revision": request_revision,
+                })
+            candidates, diagnostics, performance = solved
+            action["processed_source_wall_ids"] = sorted(set(
+                str(value) for value in (
+                    action.get("affected_wall_ids") or action.get("source_wall_ids") or []
+                )
+            ))
+            action["solver_context_wall_ids"] = performance.get("context_wall_ids") or action.get(
+                "processed_source_wall_ids"
+            )
+            action["affected_course_indices"] = performance.get("course_indices") or []
+            action["blocks_added"] = performance.get("blocks_added", 0)
+            action["blocks_removed"] = performance.get("blocks_removed", 0)
+            action["dependency_graph"] = dependency_graph(action)
         else:
-            candidates, diagnostics = self._recalculate_capture_edit(model_id, capture, action)
+            candidates, diagnostics, performance = self._recalculate_capture_edit(
+                model_id, capture, action
+            )
             cache_hit = False
-        payload = _capture_view_payload(capture, candidates, diagnostics)
+        payload_started = time.perf_counter()
+        payload = _incremental_capture_view_payload(
+            capture, candidates, diagnostics,
+            action.get("affected_wall_ids") or action.get("source_wall_ids") or [],
+        )
         payload["model_id"] = model_id
         payload["edit"] = action
+        payload["dependency_graph"] = action.get("dependency_graph") or dependency_graph(action)
         payload["preview"] = True
-        payload["performance_ms"] = {
+        performance = dict(performance)
+        performance.update({
+            "payload": round((time.perf_counter() - payload_started) * 1000.0, 1),
             "total": round((time.perf_counter() - started_at) * 1000.0, 1),
             "cache_hit": cache_hit,
-        }
+            "response_candidates": len(payload.get("block_candidates") or []),
+        })
+        payload["performance_ms"] = performance
         _session_payload_metadata(payload, session, request_revision)
         return self._send_json(200, payload)
 
@@ -650,14 +840,27 @@ class Handler(BaseHTTPRequestHandler):
         assim a UI atualiza a região dependente sem inventar uma segunda
         regra simplificada para o arraste.
         """
-        candidates, diagnostics = self._recalculate_capture_edit(model_id, capture, action)
-        payload = _capture_view_payload(capture, candidates, diagnostics)
+        if session is not None:
+            session.cancel_previews()
+        candidates, diagnostics, performance = self._recalculate_capture_edit(
+            model_id, capture, action
+        )
+        payload_started = time.perf_counter()
+        payload = _incremental_capture_view_payload(
+            capture, candidates, diagnostics,
+            action.get("affected_wall_ids") or action.get("source_wall_ids") or [],
+        )
         payload["model_id"] = model_id
         payload["edit"] = action
-        payload["performance_ms"] = {
+        payload["dependency_graph"] = action.get("dependency_graph") or dependency_graph(action)
+        performance = dict(performance)
+        performance.update({
+            "payload": round((time.perf_counter() - payload_started) * 1000.0, 1),
             "total": round((time.perf_counter() - started_at) * 1000.0, 1),
             "cache_hit": False,
-        }
+            "response_candidates": len(payload.get("block_candidates") or []),
+        })
+        payload["performance_ms"] = performance
         if session is not None:
             accepted, revision, state = session.commit(
                 base_revision, capture, candidates, diagnostics, action
@@ -672,11 +875,20 @@ class Handler(BaseHTTPRequestHandler):
             candidates = state["candidates"]
             diagnostics = state["diagnostics"]
         _remember(_CAPTURE_MODELS, model_id, capture)
-        _remember(_CAPTURE_SOLUTIONS, model_id, {"candidates": candidates, "diagnostics": diagnostics})
+        _remember(_CAPTURE_SOLUTIONS, model_id, {
+            "candidates": candidates, "diagnostics": diagnostics,
+        })
         _session_payload_metadata(payload, session, request_revision)
         for cache_key, cached_payload in list(_LOAD_CACHE.items()):
             if cached_payload.get("model_id") == model_id:
-                _remember(_LOAD_CACHE, cache_key, dict(payload))
+                cached_full = _merge_incremental_cache_payload(
+                    cached_payload, payload, candidates, diagnostics,
+                    action.get("affected_wall_ids") or action.get("source_wall_ids") or [],
+                )
+                cached_full["model_id"] = model_id
+                cached_full["performance_ms"] = dict(performance)
+                _session_payload_metadata(cached_full, session, request_revision)
+                _remember(_LOAD_CACHE, cache_key, cached_full)
                 break
         return self._send_json(200, payload)
 
